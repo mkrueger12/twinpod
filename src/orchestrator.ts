@@ -7,7 +7,7 @@ import { LinearClient } from "./linear.js";
 import { classificationPrompt, issueMarkdown, phaseGuardPrompt, renderPhasePrompt } from "./prompts.js";
 import { errorOutput } from "./process.js";
 import { ensureIssueWorktree } from "./worktree.js";
-import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, Workflow, WorkflowPhase } from "./types.js";
+import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, Workflow, WorkflowPhase } from "./types.js";
 
 export class Orchestrator {
   private readonly activeIssueIds = new Set<string>();
@@ -21,12 +21,14 @@ export class Orchestrator {
       once?: boolean;
       concurrency?: number;
       signal?: AbortSignal;
+      onEvent?: (event: RuntimeEvent) => void;
     },
   ) {}
 
   async start(): Promise<void> {
     await this.validateOpenCodeAgents();
     this.options.logger.info("Twinpod server started", { repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false });
+    this.emit({ type: "server.started", repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false, at: new Date().toISOString() });
     do {
       await this.pollAllRepos();
       if (this.options.once) break;
@@ -51,6 +53,7 @@ export class Orchestrator {
 
   private async pollAllRepos(): Promise<void> {
     for (const repo of this.options.repos) {
+      this.emit({ type: "poll.started", repoRoot: repo.repoRoot, at: new Date().toISOString() });
       for (const source of repo.twinpod.intake.sources) {
         const issues = await this.options.linear.qualifyingIssues({
           ...source,
@@ -68,28 +71,33 @@ export class Orchestrator {
 
   private async processIssue(repo: RepoRuntimeConfig, issue: LinearIssue): Promise<void> {
     this.options.logger.info("Claiming Linear issue", { issue: issue.identifier, repo: repo.repoRoot });
+    this.emitIssue(repo, issue, { stage: "claiming" });
     try {
       if (issue.state.name !== repo.twinpod.intake.claim.in_progress) await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.in_progress);
       const worktree = await ensureIssueWorktree(repo.repoRoot, issue);
       await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue), "utf8");
 
+      this.emitIssue(repo, issue, { stage: "classifying" });
       const classification = await this.loadOrCreateClassification(repo, issue, worktree.path, worktree.runDir);
       await writeFile(path.join(worktree.runDir, "classification.json"), `${JSON.stringify(classification, null, 2)}\n`, "utf8");
       await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue, classification), "utf8");
 
       if (!classification.runnable || classification.class === "unclear" || classification.class === "risky") {
+        this.emitIssue(repo, issue, { stage: "needs human input", workflow: classification.class });
         await this.escalateNotRunnable(repo, issue, classification);
         return;
       }
 
       const workflow = repo.workflows.get(classification.class);
       if (!workflow) {
+        this.emitIssue(repo, issue, { stage: "failed", workflow: classification.class });
         await this.fail(repo, issue, `No workflow configured for classifier class ${classification.class}`);
         return;
       }
 
       await this.runWorkflow(repo, issue, workflow, worktree.path, worktree.runDir);
     } catch (error) {
+      this.emitIssue(repo, issue, { stage: "failed" });
       this.options.logger.error("Issue run failed", { issue: issue.identifier, error: errorOutput(error) });
       await this.fail(repo, issue, `Twinpod stopped on an error:\n\n\`\`\`\n${errorOutput(error).slice(-10_000)}\n\`\`\``).catch((failure) => {
         this.options.logger.error("Failed to update Linear after run error", { issue: issue.identifier, error: errorOutput(failure) });
@@ -109,6 +117,7 @@ export class Orchestrator {
     await this.options.linear.commentIssue(issue.id, `Twinpod opened a green PR: ${prUrl}`);
     await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.review);
     this.options.logger.info("Issue moved to review", { issue: issue.identifier, prUrl });
+    this.emit({ type: "issue.completed", issueId: issue.id, identifier: issue.identifier, stage: "review", prUrl, at: new Date().toISOString() });
   }
 
   private async runPhaseWithGate(
@@ -128,15 +137,19 @@ export class Orchestrator {
     let prompt = await renderPhasePrompt({ repoRoot: repo.repoRoot, worktreePath, runDir, issue, phase });
     for (let cycle = 1; cycle <= maxCycles; cycle++) {
       this.options.logger.info("Running phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id, cycle, maxCycles });
+      this.emitIssue(repo, issue, { stage: "running phase", workflow: workflow.class, phase: phase.id, cycle, maxCycles });
       await assertDeclaredReads(runDir, phase);
       const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, workflow, phase, prompt });
+      this.emitIssue(repo, issue, { stage: "phase response received", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
       await writeFile(path.join(runDir, `${phase.id}.response.md`), result.text || "(no text response)\n", "utf8");
       await ensureDeclaredWrites(runDir, phase, result.text);
 
       if (phase.loop_until === "ci_green" || phase.gate === "ci_green") {
+        this.emitIssue(repo, issue, { stage: "running ci", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
         const ci = await runCi(worktreePath, repo.twinpod.ci?.command);
         await writeFile(path.join(runDir, `${phase.id}.ci.${cycle}.log`), `Command: ${ci.command ?? "none"}\nOK: ${ci.ok}\n\n${ci.output}`, "utf8");
         if (ci.ok) {
+          this.emitIssue(repo, issue, { stage: "ci green", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
           await writePhaseMarker(markerPath, phase, cycle);
           return;
         }
@@ -166,15 +179,36 @@ export class Orchestrator {
       `Twinpod did not run this issue.\n\nClassification: ${classification.class}\nRisk: ${classification.risk}\nConfidence: ${classification.confidence}\nReasons:\n${classification.reasons.map((reason) => `- ${reason}`).join("\n")}`,
     );
     await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.needs_info ?? repo.twinpod.intake.claim.failed);
+    this.emit({ type: "issue.completed", issueId: issue.id, identifier: issue.identifier, stage: "needs human input", at: new Date().toISOString() });
   }
 
   private async fail(repo: RepoRuntimeConfig, issue: LinearIssue, body: string): Promise<void> {
     await this.options.linear.commentIssue(issue.id, body);
     await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.failed);
+    this.emit({ type: "issue.completed", issueId: issue.id, identifier: issue.identifier, stage: "failed", at: new Date().toISOString() });
   }
 
   private pollIntervalMs(): number {
     return Math.min(...this.options.repos.map((repo) => parseDurationMs(repo.twinpod.intake.poll_interval)));
+  }
+
+  private emit(event: RuntimeEvent): void {
+    this.options.onEvent?.(event);
+  }
+
+  private emitIssue(repo: RepoRuntimeConfig, issue: LinearIssue, status: Partial<Omit<RuntimeIssueStatus, "issueId" | "identifier" | "title" | "url" | "repoRoot" | "updatedAt">> & { stage: string }): void {
+    this.emit({
+      type: "issue.updated",
+      status: {
+        issueId: issue.id,
+        identifier: issue.identifier,
+        title: issue.title,
+        url: issue.url,
+        repoRoot: repo.repoRoot,
+        updatedAt: new Date().toISOString(),
+        ...status,
+      },
+    });
   }
 }
 

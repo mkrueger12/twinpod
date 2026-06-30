@@ -108,6 +108,28 @@ export type PhaseRunResult = {
   costUsd?: number;
 };
 
+export type RuntimeIssueStatus = {
+  issueId: string;
+  identifier: string;
+  title: string;
+  url?: string | null;
+  repoRoot: string;
+  stage: string;
+  workflow?: string;
+  phase?: string;
+  cycle?: number;
+  maxCycles?: number;
+  costUsd?: number;
+  updatedAt: string;
+};
+
+export type RuntimeEvent =
+  | { type: "server.started"; repos: string[]; once: boolean; at: string }
+  | { type: "poll.started"; repoRoot: string; at: string }
+  | { type: "issue.updated"; status: RuntimeIssueStatus }
+  | { type: "issue.completed"; issueId: string; identifier: string; stage: string; prUrl?: string; at: string }
+  | { type: "log"; level: "info" | "warn" | "error"; message: string; meta?: Record<string, unknown>; at: string };
+
 export interface OpenCodeRunner {
   listAgents(repoRoot: string): Promise<Set<string>>;
   classify(input: { issue: LinearIssue; repoRoot: string; worktreePath: string; prompt: string }): Promise<Classification>;

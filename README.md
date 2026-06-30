@@ -15,12 +15,15 @@ Useful commands:
 ```bash
 npm run dev -- validate --repo .
 npm run dev -- serve --repo . --once
+npm run dev -- tui --repo .
 npm run dev -- cleanup --repo .
 ```
 
 `twinpod.yaml` is repo-local. Edit its Linear project/status names to match the managed repo. You can provide the Linear key with `LINEAR_API_KEY`, `linear.api_key_env`, `linear.api_key`, or `--linear-api-key`.
 
 If `OPENCODE_SERVER_URL` is set, Twinpod attaches to that server. Otherwise it starts an OpenCode server through `@opencode-ai/sdk` when needed.
+
+`twinpod tui` runs the same orchestrator with an OpenTUI dashboard showing active Linear issue, stage, phase, recent activity, and any reported OpenCode cost. OpenTUI's native renderer requires a Node runtime with experimental FFI support; use Node 26.3+ with the appropriate FFI flag for the dashboard. The regular `serve`, `validate`, and `cleanup` commands do not require that runtime.
 
 ## Verification
 

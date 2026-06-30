@@ -4,11 +4,12 @@ import { consoleLogger } from "./logger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { LinearClient } from "./linear.js";
 import { SdkOpenCodeRunner } from "./opencode.js";
+import { runTui } from "./tui.js";
 import { cleanupMergedWorktrees } from "./worktree.js";
 import type { RepoRuntimeConfig } from "./types.js";
 
 type CliOptions = {
-  command: "serve" | "cleanup" | "validate" | "help";
+  command: "serve" | "tui" | "cleanup" | "validate" | "help";
   repos: string[];
   once: boolean;
   linearApiKey?: string;
@@ -54,14 +55,19 @@ async function main() {
   });
 
   try {
-    await new Orchestrator({
-      repos,
-      linear: new LinearClient({ apiKey: linearApiKey, endpoint: linearEndpoint, pageSize }),
-      openCode,
-      logger: consoleLogger,
-      once: options.once,
-      signal: controller.signal,
-    }).start();
+    const linear = new LinearClient({ apiKey: linearApiKey, endpoint: linearEndpoint, pageSize });
+    if (options.command === "tui") {
+      await runTui({ repos, linear, openCode, once: options.once, signal: controller.signal, abort: (reason) => controller.abort(reason) });
+    } else {
+      await new Orchestrator({
+        repos,
+        linear,
+        openCode,
+        logger: consoleLogger,
+        once: options.once,
+        signal: controller.signal,
+      }).start();
+    }
   } finally {
     await openCode.close();
   }
@@ -70,8 +76,8 @@ async function main() {
 function parseArgs(args: string[]): CliOptions {
   const options: CliOptions = { command: "serve", repos: [], once: false };
   const first = args[0];
-  if (first === "serve" || first === "cleanup" || first === "validate" || first === "help") args.shift();
-  if (first === "serve" || first === "cleanup" || first === "validate" || first === "help") options.command = first;
+  if (first === "serve" || first === "tui" || first === "cleanup" || first === "validate" || first === "help") args.shift();
+  if (first === "serve" || first === "tui" || first === "cleanup" || first === "validate" || first === "help") options.command = first;
 
   for (let index = 0; index < args.length; index++) {
     const arg = args[index];
@@ -113,6 +119,7 @@ function printHelp() {
 
 Usage:
   twinpod serve [--repo PATH ...] [--once] [--linear-api-key KEY] [--opencode-url URL]
+  twinpod tui [--repo PATH ...] [--once] [--linear-api-key KEY] [--opencode-url URL]
   twinpod validate [--repo PATH ...]
   twinpod cleanup [--repo PATH ...]
 
