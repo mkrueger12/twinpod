@@ -1,0 +1,23 @@
+class: feature
+phases:
+  - id: design
+    agent: design-agent
+    prompt: prompts/design.md
+    reads: [issue.md]
+    writes: [design.md]
+  - id: planning
+    agent: plan-agent
+    prompt: prompts/planning.md
+    reads: [issue.md, design.md]
+    writes: [plan.md]
+  - id: implementation
+    agent: build-agent
+    prompt: prompts/implement.md
+    reads: [issue.md, design.md, plan.md]
+    loop_until: ci_green
+    budget: { usd: 2, cycles: 6 }
+  - id: ship
+    agent: ship-agent
+    prompt: prompts/ship.md
+    reads: [issue.md, plan.md]
+    gate: ci_green

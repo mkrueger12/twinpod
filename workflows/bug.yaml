@@ -1,0 +1,18 @@
+class: bug
+phases:
+  - id: reproduce
+    agent: build-agent
+    prompt: prompts/reproduce-bug.md
+    reads: [issue.md]
+    writes: [repro.md]
+  - id: implementation
+    agent: build-agent
+    prompt: prompts/implement.md
+    reads: [issue.md, repro.md]
+    loop_until: ci_green
+    budget: { usd: 2, cycles: 6 }
+  - id: ship
+    agent: ship-agent
+    prompt: prompts/ship.md
+    reads: [issue.md, repro.md]
+    gate: ci_green

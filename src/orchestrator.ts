@@ -1,0 +1,210 @@
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { currentPrUrl, runCi } from "./ci.js";
+import { parseDurationMs, sleep } from "./duration.js";
+import { LinearClient } from "./linear.js";
+import { classificationPrompt, issueMarkdown, phaseGuardPrompt, renderPhasePrompt } from "./prompts.js";
+import { errorOutput } from "./process.js";
+import { ensureIssueWorktree } from "./worktree.js";
+import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, Workflow, WorkflowPhase } from "./types.js";
+
+export class Orchestrator {
+  private readonly activeIssueIds = new Set<string>();
+
+  constructor(
+    private readonly options: {
+      repos: RepoRuntimeConfig[];
+      linear: LinearClient;
+      openCode: OpenCodeRunner;
+      logger: Logger;
+      once?: boolean;
+      concurrency?: number;
+      signal?: AbortSignal;
+    },
+  ) {}
+
+  async start(): Promise<void> {
+    await this.validateOpenCodeAgents();
+    this.options.logger.info("Twinpod server started", { repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false });
+    do {
+      await this.pollAllRepos();
+      if (this.options.once) break;
+      await sleep(this.pollIntervalMs(), this.options.signal);
+    } while (!this.options.signal?.aborted);
+  }
+
+  private async validateOpenCodeAgents(): Promise<void> {
+    const missing: string[] = [];
+    await Promise.all(
+      this.options.repos.map(async (repo) => {
+        const openCodeAgents = await this.options.openCode.listAgents(repo.repoRoot).catch(() => repo.agents);
+        for (const workflow of repo.workflows.values()) {
+          for (const phase of workflow.phases) {
+            if (!openCodeAgents.has(phase.agent)) missing.push(`${phase.agent} referenced by ${path.relative(repo.repoRoot, workflow.filePath)} phase ${phase.id}`);
+          }
+        }
+      }),
+    );
+    if (missing.length > 0) throw new Error(`OpenCode agent referential integrity failed:\n${missing.map((item) => `- ${item}`).join("\n")}`);
+  }
+
+  private async pollAllRepos(): Promise<void> {
+    for (const repo of this.options.repos) {
+      for (const source of repo.twinpod.intake.sources) {
+        const issues = await this.options.linear.qualifyingIssues({
+          ...source,
+          statuses: unique([...source.statuses, repo.twinpod.intake.claim.in_progress]),
+        });
+        for (const issue of issues) {
+          if (this.activeIssueIds.has(issue.id)) continue;
+          this.activeIssueIds.add(issue.id);
+          void this.processIssue(repo, issue).finally(() => this.activeIssueIds.delete(issue.id));
+        }
+      }
+    }
+    while (this.activeIssueIds.size > 0 && this.options.once) await sleep(250, this.options.signal);
+  }
+
+  private async processIssue(repo: RepoRuntimeConfig, issue: LinearIssue): Promise<void> {
+    this.options.logger.info("Claiming Linear issue", { issue: issue.identifier, repo: repo.repoRoot });
+    try {
+      if (issue.state.name !== repo.twinpod.intake.claim.in_progress) await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.in_progress);
+      const worktree = await ensureIssueWorktree(repo.repoRoot, issue);
+      await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue), "utf8");
+
+      const classification = await this.loadOrCreateClassification(repo, issue, worktree.path, worktree.runDir);
+      await writeFile(path.join(worktree.runDir, "classification.json"), `${JSON.stringify(classification, null, 2)}\n`, "utf8");
+      await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue, classification), "utf8");
+
+      if (!classification.runnable || classification.class === "unclear" || classification.class === "risky") {
+        await this.escalateNotRunnable(repo, issue, classification);
+        return;
+      }
+
+      const workflow = repo.workflows.get(classification.class);
+      if (!workflow) {
+        await this.fail(repo, issue, `No workflow configured for classifier class ${classification.class}`);
+        return;
+      }
+
+      await this.runWorkflow(repo, issue, workflow, worktree.path, worktree.runDir);
+    } catch (error) {
+      this.options.logger.error("Issue run failed", { issue: issue.identifier, error: errorOutput(error) });
+      await this.fail(repo, issue, `Twinpod stopped on an error:\n\n\`\`\`\n${errorOutput(error).slice(-10_000)}\n\`\`\``).catch((failure) => {
+        this.options.logger.error("Failed to update Linear after run error", { issue: issue.identifier, error: errorOutput(failure) });
+      });
+    }
+  }
+
+  private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string): Promise<void> {
+    for (const phase of workflow.phases) {
+      await this.runPhaseWithGate(repo, issue, workflow, phase, worktreePath, runDir);
+    }
+    const prUrl = await currentPrUrl(worktreePath);
+    if (!prUrl) {
+      await this.fail(repo, issue, "Workflow completed, but no GitHub PR was found for the worktree branch. The ship phase must push/open a PR before Twinpod can move the issue to review.");
+      return;
+    }
+    await this.options.linear.commentIssue(issue.id, `Twinpod opened a green PR: ${prUrl}`);
+    await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.review);
+    this.options.logger.info("Issue moved to review", { issue: issue.identifier, prUrl });
+  }
+
+  private async runPhaseWithGate(
+    repo: RepoRuntimeConfig,
+    issue: LinearIssue,
+    workflow: Workflow,
+    phase: WorkflowPhase,
+    worktreePath: string,
+    runDir: string,
+  ): Promise<void> {
+    const markerPath = path.join(runDir, `${phase.id}.done.json`);
+    if (existsSync(markerPath)) {
+      this.options.logger.info("Skipping completed phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id });
+      return;
+    }
+    const maxCycles = phase.loop_until === "ci_green" ? phase.budget?.cycles ?? 1 : 1;
+    let prompt = await renderPhasePrompt({ repoRoot: repo.repoRoot, worktreePath, runDir, issue, phase });
+    for (let cycle = 1; cycle <= maxCycles; cycle++) {
+      this.options.logger.info("Running phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id, cycle, maxCycles });
+      await assertDeclaredReads(runDir, phase);
+      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, workflow, phase, prompt });
+      await writeFile(path.join(runDir, `${phase.id}.response.md`), result.text || "(no text response)\n", "utf8");
+      await ensureDeclaredWrites(runDir, phase, result.text);
+
+      if (phase.loop_until === "ci_green" || phase.gate === "ci_green") {
+        const ci = await runCi(worktreePath, repo.twinpod.ci?.command);
+        await writeFile(path.join(runDir, `${phase.id}.ci.${cycle}.log`), `Command: ${ci.command ?? "none"}\nOK: ${ci.ok}\n\n${ci.output}`, "utf8");
+        if (ci.ok) {
+          await writePhaseMarker(markerPath, phase, cycle);
+          return;
+        }
+        if (cycle === maxCycles || phase.gate === "ci_green") throw new Error(`CI gate failed in phase ${phase.id}: ${ci.output.slice(-4000)}`);
+        prompt = phaseGuardPrompt({ phaseId: phase.id, failedCommand: ci.command, output: ci.output });
+        continue;
+      }
+      await writePhaseMarker(markerPath, phase, cycle);
+      return;
+    }
+  }
+
+  private async loadOrCreateClassification(repo: RepoRuntimeConfig, issue: LinearIssue, worktreePath: string, runDir: string): Promise<Classification> {
+    const classificationPath = path.join(runDir, "classification.json");
+    if (existsSync(classificationPath)) return JSON.parse(await readFile(classificationPath, "utf8")) as Classification;
+    return this.options.openCode.classify({
+      issue,
+      repoRoot: repo.repoRoot,
+      worktreePath,
+      prompt: classificationPrompt(issue),
+    });
+  }
+
+  private async escalateNotRunnable(repo: RepoRuntimeConfig, issue: LinearIssue, classification: Classification): Promise<void> {
+    await this.options.linear.commentIssue(
+      issue.id,
+      `Twinpod did not run this issue.\n\nClassification: ${classification.class}\nRisk: ${classification.risk}\nConfidence: ${classification.confidence}\nReasons:\n${classification.reasons.map((reason) => `- ${reason}`).join("\n")}`,
+    );
+    await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.needs_info ?? repo.twinpod.intake.claim.failed);
+  }
+
+  private async fail(repo: RepoRuntimeConfig, issue: LinearIssue, body: string): Promise<void> {
+    await this.options.linear.commentIssue(issue.id, body);
+    await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.failed);
+  }
+
+  private pollIntervalMs(): number {
+    return Math.min(...this.options.repos.map((repo) => parseDurationMs(repo.twinpod.intake.poll_interval)));
+  }
+}
+
+function unique<T>(items: T[]): T[] {
+  return [...new Set(items)];
+}
+
+async function writePhaseMarker(markerPath: string, phase: WorkflowPhase, cycle: number): Promise<void> {
+  await writeFile(markerPath, `${JSON.stringify({ phase: phase.id, completed_at: new Date().toISOString(), cycle }, null, 2)}\n`, "utf8");
+}
+
+async function ensureDeclaredWrites(runDir: string, phase: WorkflowPhase, fallbackText: string): Promise<void> {
+  await mkdir(runDir, { recursive: true });
+  for (const file of phase.writes ?? []) {
+    const filePath = path.join(runDir, file);
+    if (existsSync(filePath)) continue;
+    await mkdir(path.dirname(filePath), { recursive: true });
+    await writeFile(filePath, fallbackText || `# ${phase.id}\n\nOpenCode did not provide a text response.\n`, "utf8");
+  }
+  for (const file of phase.reads ?? []) {
+    const filePath = path.join(runDir, file);
+    if (!existsSync(filePath)) throw new Error(`Phase ${phase.id} declared missing read handoff ${file}`);
+    await readFile(filePath, "utf8");
+  }
+}
+
+async function assertDeclaredReads(runDir: string, phase: WorkflowPhase): Promise<void> {
+  for (const file of phase.reads ?? []) {
+    const filePath = path.join(runDir, file);
+    if (!existsSync(filePath)) throw new Error(`Phase ${phase.id} declared missing read handoff ${file}`);
+    await readFile(filePath, "utf8");
+  }
+}

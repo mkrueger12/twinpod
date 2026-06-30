@@ -1,0 +1,16 @@
+linear:
+  api_key_env: LINEAR_API_KEY
+
+intake:
+  poll_interval: 30s
+  sources:
+    - project: "Twinpod Backlog"
+      statuses: ["Ready for Agent"]
+  claim:
+    in_progress: "Agent: In Progress"
+    review: "Agent: In Review"
+    failed: "Agent: Needs Attention"
+    needs_info: "Needs Scoping"
+
+ci:
+  command: npm run check
