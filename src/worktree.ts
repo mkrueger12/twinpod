@@ -1,15 +1,28 @@
 import { existsSync } from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runFile } from "./process.js";
 import { slugify } from "./slug.js";
-import type { LinearIssue } from "./types.js";
+import type { LinearIssue, StageLibrary } from "./types.js";
 
 export type WorktreeInfo = {
   branch: string;
   path: string;
   runDir: string;
 };
+
+export async function materializeStageLibrary(worktreePath: string, stageLibrary: StageLibrary): Promise<void> {
+  const agentsDir = path.join(worktreePath, ".opencode", "agents");
+  await mkdir(agentsDir, { recursive: true });
+  for (const [name, filePath] of stageLibrary.agentFiles) {
+    await cp(filePath, path.join(agentsDir, `${name}.md`));
+  }
+
+  const skillsSrc = path.join(stageLibrary.root, "skills");
+  if (existsSync(skillsSrc)) {
+    await cp(skillsSrc, path.join(worktreePath, ".opencode", "skills"), { recursive: true });
+  }
+}
 
 export async function ensureIssueWorktree(repoRoot: string, issue: LinearIssue): Promise<WorktreeInfo> {
   const branch = `twinpod/${issue.identifier.toLowerCase()}-${slugify(issue.title)}`;

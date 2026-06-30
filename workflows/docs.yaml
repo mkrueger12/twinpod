@@ -1,18 +1,15 @@
 class: docs
 phases:
   - id: planning
-    agent: docs-agent
-    prompt: prompts/docs-plan.md
+    prompt: docs-plan
     reads: [issue.md]
     writes: [plan.md]
   - id: implementation
-    agent: docs-agent
-    prompt: prompts/docs-implement.md
+    prompt: docs-implement
     reads: [issue.md, plan.md]
     loop_until: ci_green
     budget: { usd: 1, cycles: 3 }
   - id: ship
-    agent: ship-agent
-    prompt: prompts/ship.md
+    prompt: ship
     reads: [issue.md, plan.md]
     gate: ci_green

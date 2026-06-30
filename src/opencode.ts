@@ -13,13 +13,6 @@ export class SdkOpenCodeRunner implements OpenCodeRunner {
 
   constructor(private readonly options: { baseUrl?: string; hostname?: string; port?: number; signal?: AbortSignal } = {}) {}
 
-  async listAgents(repoRoot: string): Promise<Set<string>> {
-    const client = await this.client();
-    const result = await call(client, ["app", "agents"], { query: { directory: repoRoot } });
-    const agents = unwrap<Array<{ name: string }>>(result as AnyResponse<Array<{ name: string }>>);
-    return new Set(agents.map((agent) => agent.name));
-  }
-
   async classify(input: { issue: LinearIssue; repoRoot: string; worktreePath: string; prompt: string }): Promise<Classification> {
     const client = await this.client();
     const session = unwrap<{ id: string }>(
@@ -74,7 +67,7 @@ export class SdkOpenCodeRunner implements OpenCodeRunner {
       path: { id: session.id },
       query: { directory: input.worktreePath },
       body: {
-        agent: input.phase.agent,
+        agent: input.agent,
         parts: [{ type: "text", text: input.prompt }],
       },
     });

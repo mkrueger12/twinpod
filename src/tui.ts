@@ -1,7 +1,7 @@
 import { basename } from "node:path";
 import { Orchestrator } from "./orchestrator.js";
 import type { LinearClient } from "./linear.js";
-import type { Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus } from "./types.js";
+import type { Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary } from "./types.js";
 
 type OpenTuiCore = {
   createCliRenderer(options?: Record<string, unknown>): Promise<unknown>;
@@ -32,6 +32,7 @@ type TuiState = {
 
 export async function runTui(options: {
   repos: RepoRuntimeConfig[];
+  stageLibrary: StageLibrary;
   linear: LinearClient;
   openCode: OpenCodeRunner;
   once?: boolean;
@@ -91,6 +92,7 @@ export async function runTui(options: {
   try {
     await new Orchestrator({
       repos: options.repos,
+      stageLibrary: options.stageLibrary,
       linear: options.linear,
       openCode: options.openCode,
       logger,

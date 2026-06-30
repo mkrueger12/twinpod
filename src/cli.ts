@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { loadRepoConfigs } from "./config.js";
+import { findTwinpodRoot, loadRepoConfigs, loadStageLibrary } from "./config.js";
 import { consoleLogger } from "./logger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { LinearClient } from "./linear.js";
@@ -25,7 +25,8 @@ async function main() {
     return;
   }
 
-  const repos = await loadRepoConfigs(options.repos.length > 0 ? options.repos : [process.cwd()]);
+  const stageLibrary = await loadStageLibrary(findTwinpodRoot());
+  const repos = await loadRepoConfigs(options.repos.length > 0 ? options.repos : [process.cwd()], stageLibrary);
 
   if (options.command === "validate") {
     consoleLogger.info("Configuration is valid", { repos: repos.map((repo) => repo.repoRoot) });
@@ -57,10 +58,11 @@ async function main() {
   try {
     const linear = new LinearClient({ apiKey: linearApiKey, endpoint: linearEndpoint, pageSize });
     if (options.command === "tui") {
-      await runTui({ repos, linear, openCode, once: options.once, signal: controller.signal, abort: (reason) => controller.abort(reason) });
+      await runTui({ repos, stageLibrary, linear, openCode, once: options.once, signal: controller.signal, abort: (reason) => controller.abort(reason) });
     } else {
       await new Orchestrator({
         repos,
+        stageLibrary,
         linear,
         openCode,
         logger: consoleLogger,

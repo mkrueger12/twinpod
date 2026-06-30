@@ -6,8 +6,8 @@ import { parseDurationMs, sleep } from "./duration.js";
 import { LinearClient } from "./linear.js";
 import { classificationPrompt, issueMarkdown, phaseGuardPrompt, renderPhasePrompt } from "./prompts.js";
 import { errorOutput } from "./process.js";
-import { ensureIssueWorktree } from "./worktree.js";
-import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, Workflow, WorkflowPhase } from "./types.js";
+import { ensureIssueWorktree, materializeStageLibrary } from "./worktree.js";
+import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary, Workflow, WorkflowPhase } from "./types.js";
 
 export class Orchestrator {
   private readonly activeIssueIds = new Set<string>();
@@ -15,6 +15,7 @@ export class Orchestrator {
   constructor(
     private readonly options: {
       repos: RepoRuntimeConfig[];
+      stageLibrary: StageLibrary;
       linear: LinearClient;
       openCode: OpenCodeRunner;
       logger: Logger;
@@ -26,7 +27,6 @@ export class Orchestrator {
   ) {}
 
   async start(): Promise<void> {
-    await this.validateOpenCodeAgents();
     this.options.logger.info("Twinpod server started", { repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false });
     this.emit({ type: "server.started", repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false, at: new Date().toISOString() });
     do {
@@ -34,21 +34,6 @@ export class Orchestrator {
       if (this.options.once) break;
       await sleep(this.pollIntervalMs(), this.options.signal);
     } while (!this.options.signal?.aborted);
-  }
-
-  private async validateOpenCodeAgents(): Promise<void> {
-    const missing: string[] = [];
-    await Promise.all(
-      this.options.repos.map(async (repo) => {
-        const openCodeAgents = await this.options.openCode.listAgents(repo.repoRoot).catch(() => repo.agents);
-        for (const workflow of repo.workflows.values()) {
-          for (const phase of workflow.phases) {
-            if (!openCodeAgents.has(phase.agent)) missing.push(`${phase.agent} referenced by ${path.relative(repo.repoRoot, workflow.filePath)} phase ${phase.id}`);
-          }
-        }
-      }),
-    );
-    if (missing.length > 0) throw new Error(`OpenCode agent referential integrity failed:\n${missing.map((item) => `- ${item}`).join("\n")}`);
   }
 
   private async pollAllRepos(): Promise<void> {
@@ -75,6 +60,7 @@ export class Orchestrator {
     try {
       if (issue.state.name !== repo.twinpod.intake.claim.in_progress) await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.in_progress);
       const worktree = await ensureIssueWorktree(repo.repoRoot, issue);
+      await materializeStageLibrary(worktree.path, this.options.stageLibrary);
       await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue), "utf8");
 
       this.emitIssue(repo, issue, { stage: "classifying" });
@@ -133,13 +119,15 @@ export class Orchestrator {
       this.options.logger.info("Skipping completed phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id });
       return;
     }
+    const promptDef = this.options.stageLibrary.prompts.get(phase.prompt);
+    if (!promptDef) throw new Error(`Phase ${phase.id} references prompt ${phase.prompt}, which is not defined in twinpod's prompts/`);
     const maxCycles = phase.loop_until === "ci_green" ? phase.budget?.cycles ?? 1 : 1;
-    let prompt = await renderPhasePrompt({ repoRoot: repo.repoRoot, worktreePath, runDir, issue, phase });
+    let prompt = renderPhasePrompt({ template: promptDef.template, worktreePath, runDir, issue, phase });
     for (let cycle = 1; cycle <= maxCycles; cycle++) {
       this.options.logger.info("Running phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id, cycle, maxCycles });
       this.emitIssue(repo, issue, { stage: "running phase", workflow: workflow.class, phase: phase.id, cycle, maxCycles });
       await assertDeclaredReads(runDir, phase);
-      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, workflow, phase, prompt });
+      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, workflow, phase, agent: promptDef.agent, prompt });
       this.emitIssue(repo, issue, { stage: "phase response received", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
       await writeFile(path.join(runDir, `${phase.id}.response.md`), result.text || "(no text response)\n", "utf8");
       await ensureDeclaredWrites(runDir, phase, result.text);

@@ -44,7 +44,6 @@ export type Budget = {
 
 export type WorkflowPhase = {
   id: string;
-  agent: string;
   prompt: string;
   reads?: string[];
   writes?: string[];
@@ -63,7 +62,19 @@ export type RepoRuntimeConfig = {
   repoRoot: string;
   twinpod: TwinpodConfig;
   workflows: Map<string, Workflow>;
+};
+
+export type PromptDefinition = {
+  name: string;
+  agent: string;
+  template: string;
+};
+
+export type StageLibrary = {
+  root: string;
+  prompts: Map<string, PromptDefinition>;
   agents: Set<string>;
+  agentFiles: Map<string, string>;
 };
 
 export type LinearIssue = {
@@ -100,6 +111,7 @@ export type PhaseRunInput = {
   issue: LinearIssue;
   workflow: Workflow;
   phase: WorkflowPhase;
+  agent: string;
   prompt: string;
 };
 
@@ -131,7 +143,6 @@ export type RuntimeEvent =
   | { type: "log"; level: "info" | "warn" | "error"; message: string; meta?: Record<string, unknown>; at: string };
 
 export interface OpenCodeRunner {
-  listAgents(repoRoot: string): Promise<Set<string>>;
   classify(input: { issue: LinearIssue; repoRoot: string; worktreePath: string; prompt: string }): Promise<Classification>;
   runPhase(input: PhaseRunInput): Promise<PhaseRunResult>;
   close(): Promise<void>;

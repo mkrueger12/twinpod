@@ -1,24 +1,20 @@
 class: refactor
 phases:
   - id: planning
-    agent: plan-agent
-    prompt: prompts/refactor-plan.md
+    prompt: refactor-plan
     reads: [issue.md]
     writes: [plan.md]
   - id: implementation
-    agent: build-agent
-    prompt: prompts/refactor-implement.md
+    prompt: refactor-implement
     reads: [issue.md, plan.md]
     loop_until: ci_green
     budget: { usd: 2, cycles: 6 }
   - id: simplify
-    agent: build-agent
-    prompt: prompts/simplify.md
+    prompt: simplify
     reads: [issue.md, plan.md]
     loop_until: ci_green
     budget: { usd: 1, cycles: 3 }
   - id: ship
-    agent: ship-agent
-    prompt: prompts/ship.md
+    prompt: ship
     reads: [issue.md, plan.md]
     gate: ci_green

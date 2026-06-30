@@ -1,10 +1,22 @@
 import { existsSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import YAML from "yaml";
-import type { RepoRuntimeConfig, TwinpodConfig, Workflow, WorkflowPhase } from "./types.js";
+import type { PromptDefinition, RepoRuntimeConfig, StageLibrary, TwinpodConfig, Workflow, WorkflowPhase } from "./types.js";
 
-export async function loadRepoConfig(repoRootInput: string): Promise<RepoRuntimeConfig> {
+export function findTwinpodRoot(): string {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+}
+
+export async function loadStageLibrary(twinpodRootInput: string): Promise<StageLibrary> {
+  const root = path.resolve(twinpodRootInput);
+  const { agents, agentFiles } = await readAgents(root);
+  const prompts = await readPrompts(root, agents);
+  return { root, prompts, agents, agentFiles };
+}
+
+export async function loadRepoConfig(repoRootInput: string, stageLibrary: StageLibrary): Promise<RepoRuntimeConfig> {
   const repoRoot = path.resolve(repoRootInput);
   const configPath = path.join(repoRoot, "twinpod.yaml");
   if (!existsSync(configPath)) throw new Error(`Missing twinpod.yaml in ${repoRoot}`);
@@ -12,16 +24,16 @@ export async function loadRepoConfig(repoRootInput: string): Promise<RepoRuntime
   const parsed = YAML.parse(await readFile(configPath, "utf8")) as unknown;
   const twinpod = parseTwinpodConfig(parsed, repoRoot, configPath);
   const workflows = await loadWorkflows(repoRoot);
-  const agents = await readLocalAgents(repoRoot);
-  validateRepoConfig({ repoRoot, twinpod, workflows, agents });
-  return { repoRoot, twinpod, workflows, agents };
+  const config: RepoRuntimeConfig = { repoRoot, twinpod, workflows };
+  validateRepoConfig(config, stageLibrary);
+  return config;
 }
 
-export async function loadRepoConfigs(repoRoots: string[]): Promise<RepoRuntimeConfig[]> {
-  return Promise.all(repoRoots.map((repoRoot) => loadRepoConfig(repoRoot)));
+export async function loadRepoConfigs(repoRoots: string[], stageLibrary: StageLibrary): Promise<RepoRuntimeConfig[]> {
+  return Promise.all(repoRoots.map((repoRoot) => loadRepoConfig(repoRoot, stageLibrary)));
 }
 
-export function validateRepoConfig(config: RepoRuntimeConfig): void {
+export function validateRepoConfig(config: RepoRuntimeConfig, stageLibrary: StageLibrary): void {
   if (config.twinpod.intake.sources.length === 0) {
     throw new Error(`${config.repoRoot}: intake.sources must contain at least one source`);
   }
@@ -32,10 +44,7 @@ export function validateRepoConfig(config: RepoRuntimeConfig): void {
   const missing: string[] = [];
   for (const workflow of config.workflows.values()) {
     workflow.phases.forEach((phase) => {
-      if (!config.agents.has(phase.agent)) missing.push(`${phase.agent} referenced by ${path.relative(config.repoRoot, workflow.filePath)} phase ${phase.id}`);
-      if (!existsSync(path.join(config.repoRoot, phase.prompt))) {
-        missing.push(`prompt ${phase.prompt} referenced by ${path.relative(config.repoRoot, workflow.filePath)} phase ${phase.id}`);
-      }
+      if (!stageLibrary.prompts.has(phase.prompt)) missing.push(`prompt ${phase.prompt} referenced by ${path.relative(config.repoRoot, workflow.filePath)} phase ${phase.id} is not defined in twinpod's prompts/`);
     });
   }
   if (missing.length > 0) throw new Error(`${config.repoRoot}: invalid workflow references:\n${missing.map((entry) => `- ${entry}`).join("\n")}`);
@@ -117,7 +126,6 @@ function parsePhase(value: unknown, context: string): WorkflowPhase {
   const phase = requireRecord(value, context);
   return {
     id: requireString(phase.id, `${context}.id`),
-    agent: requireString(phase.agent, `${context}.agent`),
     prompt: requireString(phase.prompt, `${context}.prompt`),
     reads: optionalStringArray(phase.reads),
     writes: optionalStringArray(phase.writes),
@@ -132,10 +140,11 @@ function parseBudget(value: unknown, context: string) {
   return { usd: optionalNumber(budget.usd), cycles: optionalNumber(budget.cycles) };
 }
 
-export async function readLocalAgents(repoRoot: string): Promise<Set<string>> {
+async function readAgents(twinpodRoot: string): Promise<{ agents: Set<string>; agentFiles: Map<string, string> }> {
   const agents = new Set<string>(["general", "build", "plan", "explore"]);
+  const agentFiles = new Map<string, string>();
   for (const file of ["opencode.json", "opencode.jsonc", path.join(".opencode", "opencode.json"), path.join(".opencode", "opencode.jsonc")]) {
-    const filePath = path.join(repoRoot, file);
+    const filePath = path.join(twinpodRoot, file);
     if (!existsSync(filePath)) continue;
     const content = stripJsonComments(await readFile(filePath, "utf8"));
     const parsed = JSON.parse(content) as { agent?: Record<string, unknown>; mode?: Record<string, unknown> };
@@ -143,27 +152,55 @@ export async function readLocalAgents(repoRoot: string): Promise<Set<string>> {
     Object.keys(parsed.mode ?? {}).forEach((name) => agents.add(name));
   }
 
-  const agentDir = path.join(repoRoot, ".opencode", "agents");
+  const agentDir = path.join(twinpodRoot, ".opencode", "agents");
   if (existsSync(agentDir)) {
     const entries = await readdir(agentDir, { withFileTypes: true });
     for (const entry of entries) {
       if (!entry.isFile() || !/\.md$/i.test(entry.name)) continue;
       const filePath = path.join(agentDir, entry.name);
-      agents.add(entry.name.replace(/\.md$/i, ""));
-      const frontmatterName = parseFrontmatterName(await readFile(filePath, "utf8"));
-      if (frontmatterName) agents.add(frontmatterName);
+      const stem = entry.name.replace(/\.md$/i, "");
+      agents.add(stem);
+      agentFiles.set(stem, filePath);
+      const frontmatter = parseFrontmatter(await readFile(filePath, "utf8"));
+      const frontmatterName = typeof frontmatter.name === "string" ? frontmatter.name : undefined;
+      if (frontmatterName) {
+        agents.add(frontmatterName);
+        agentFiles.set(frontmatterName, filePath);
+      }
     }
   }
-  return agents;
+  return { agents, agentFiles };
 }
 
-function parseFrontmatterName(content: string): string | undefined {
+async function readPrompts(twinpodRoot: string, agents: Set<string>): Promise<Map<string, PromptDefinition>> {
+  const prompts = new Map<string, PromptDefinition>();
+  const promptsDir = path.join(twinpodRoot, "prompts");
+  if (!existsSync(promptsDir)) return prompts;
+  const entries = await readdir(promptsDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (!entry.isFile() || !/\.md$/i.test(entry.name)) continue;
+    const filePath = path.join(promptsDir, entry.name);
+    const content = await readFile(filePath, "utf8");
+    const frontmatter = parseFrontmatter(content);
+    const agent = frontmatter.agent;
+    if (typeof agent !== "string" || agent.trim() === "") throw new Error(`${filePath}: prompt is missing required frontmatter field "agent"`);
+    if (!agents.has(agent)) throw new Error(`${filePath}: frontmatter agent "${agent}" is not defined in .opencode/agents/`);
+    const name = typeof frontmatter.name === "string" ? frontmatter.name : entry.name.replace(/\.md$/i, "");
+    prompts.set(name, { name, agent, template: stripFrontmatter(content) });
+  }
+  return prompts;
+}
+
+function parseFrontmatter(content: string): Record<string, unknown> {
   const match = /^---\n([\s\S]*?)\n---/.exec(content);
-  if (!match) return undefined;
+  if (!match) return {};
   const parsed = YAML.parse(match[1]) as unknown;
-  if (!parsed || typeof parsed !== "object") return undefined;
-  const name = (parsed as { name?: unknown }).name;
-  return typeof name === "string" ? name : undefined;
+  return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : {};
+}
+
+function stripFrontmatter(content: string): string {
+  const match = /^---\n[\s\S]*?\n---\n?/.exec(content);
+  return match ? content.slice(match[0].length) : content;
 }
 
 function stripJsonComments(content: string): string {

@@ -1,18 +1,16 @@
-import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { Classification, LinearIssue, WorkflowPhase } from "./types.js";
 
-export async function renderPhasePrompt(input: {
-  repoRoot: string;
+export function renderPhasePrompt(input: {
+  template: string;
   worktreePath: string;
   runDir: string;
   issue: LinearIssue;
   phase: WorkflowPhase;
-}): Promise<string> {
-  const template = await readFile(path.join(input.repoRoot, input.phase.prompt), "utf8");
+}): string {
   const reads = (input.phase.reads ?? []).map((file) => path.join(input.runDir, file)).join(", ");
   const writes = (input.phase.writes ?? []).map((file) => path.join(input.runDir, file)).join(", ");
-  return interpolate(template, {
+  return interpolate(input.template, {
     issue_id: input.issue.identifier,
     issue_uuid: input.issue.id,
     issue_title: input.issue.title,
