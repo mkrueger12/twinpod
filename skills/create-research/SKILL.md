@@ -22,12 +22,9 @@ This skill is the second phase of the research → plan → implement flow: **cr
 
 When this command is invoked, check the task artifact directory (`.twinpod/TASKNAME/`) for documents matching `*research-questions*.md` with `ls -La` — this is the output of `create-research-questions`. If you find one, read it and proceed with the contents as the research query.
 
-If you see several, ask the user which one to proceed with before reading any of them.
+If you see several, use the most recently modified one — there is no human available to ask mid-run.
 
-If you do not know what the task artifact directory is, respond with:
-```
-I'm ready to research the codebase. Please provide your research question or area of interest, and I'll analyze it thoroughly by exploring relevant components and connections.
-```
+If you cannot locate a task artifact directory or a `*research-questions*.md` document inside it, this is a fatal configuration error: stop and report exactly what you searched and what's missing, rather than waiting for input that will never arrive.
 
 **IMPORTANT**: You may NEVER read `ticket.md` files or other files from the artifact directory which do not match the `research-questions` pattern above unless such a file is explicitly asked for by the user.
 

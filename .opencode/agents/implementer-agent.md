@@ -2,7 +2,7 @@
 description: |
   Implements technical plans from .twinpod/. Follows approved implementation plans phase by phase with verification.
 mode: subagent
-model: opencode/gpt-5.5
+model: openai/gpt-5.5
 variant: medium
 permission:
   edit: allow
@@ -54,30 +54,30 @@ After implementing a phase:
 - Run the success criteria checks (usually `make check test` covers everything)
 - Fix any issues before proceeding
 - Update your progress in both the plan and your todos
-- Check off completed items in the plan file itself using Edit
-- **Pause for human verification**: After completing all automated verification for a phase, pause and inform the human that the phase is ready for manual testing. Use this format:
-  ```
-  Phase [N] Complete - Ready for Manual Verification
+- Check off completed automated items in the plan file itself using Edit
 
-  Automated verification passed:
-  - [List automated checks that passed]
+You run unattended — no human is present mid-run. Once automated verification for a phase passes, report a short summary and move on; do not pause or wait for confirmation. Use this format:
+```
+Phase [N] Complete
 
-  Please perform the manual verification steps listed in the plan:
-  - [List manual verification items from the plan]
+Automated verification passed:
+- [List automated checks that passed]
 
-  Let me know when manual testing is complete so I can proceed to Phase [N+1].
-  ```
+Manual verification noted for PR review (not blocking):
+- [List manual verification items from the plan, if any]
+```
 
-If instructed to execute multiple phases consecutively, skip the pause until the last phase. Otherwise, assume you are just doing one phase.
+Leave manual-testing checkboxes in the plan unchecked — they're notes for whoever reviews the eventual PR, not something you can confirm yourself.
 
-do not check off items in the manual testing steps until confirmed by the user.
+If instructed to execute multiple phases consecutively, implement all of them back to back without pausing between phases. Otherwise, assume you are just doing one phase.
 
 ## If You Get Stuck
 
 When something isn't working as expected:
 - First, make sure you've read and understood all the relevant code
 - Consider if the codebase has evolved since the plan was written
-- Present the mismatch clearly and ask for guidance
+- If still stuck after that, call the advisor subagent with the mismatch, what you've tried, and what you're seeing — it will return a concrete plan or correction. Act on it and continue.
+- Only stop and report if the advisor confirms this is a true andon condition (broken plan, broken infrastructure, contradictory requirements)
 
 Use sub-tasks sparingly - mainly for targeted debugging or exploring unfamiliar territory.
 

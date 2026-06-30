@@ -74,10 +74,10 @@ export class Orchestrator {
         return;
       }
 
-      const workflow = repo.workflows.get(classification.class);
+      const workflow = repo.workflows.get(classification.class) ?? repo.workflows.get("default");
       if (!workflow) {
         this.emitIssue(repo, issue, { stage: "failed", workflow: classification.class });
-        await this.fail(repo, issue, `No workflow configured for classifier class ${classification.class}`);
+        await this.fail(repo, issue, `No workflow configured for classifier class ${classification.class}, and no default workflow is defined`);
         return;
       }
 

@@ -2,7 +2,7 @@
 description: |
   Do you find yourself desiring information that you don't quite feel well-trained (confident) on? Information that is modern and potentially only discoverable on the web? Use the web-search-researcher subagent today to find any and all answers to your questions! It will research deeply to figure out and attempt to answer your questions! If you aren't immediately satisfied you can get your money back! (Not really - but you can re-run web-search-researcher with an altered prompt in the event you're not satisfied the first time)
 mode: subagent
-model: opencode/gpt-5.5
+model: openai/gpt-5.5
 variant: medium
 permission:
   edit: deny

@@ -1,5 +1,5 @@
 ---
-agent: ship-agent
+agent: ship-pr-agent
 ---
 Read {{reads}} for Linear issue {{issue_id}} in worktree {{worktree_path}}.
 

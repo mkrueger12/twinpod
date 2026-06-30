@@ -2,7 +2,7 @@
 description: |
   codebase-pattern-finder is a useful subagent for finding similar implementations, usage examples, or existing patterns that can be modeled after. It will give you concrete code examples based on what you're looking for! It's sorta like codebase-locator, but it will not only tell you the location of files, it will also give you code details!
 mode: subagent
-model: opencode/gpt-5.5
+model: openai/gpt-5.5
 variant: medium
 permission:
   edit: deny

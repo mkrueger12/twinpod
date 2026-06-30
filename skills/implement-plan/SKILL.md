@@ -41,8 +41,8 @@ Run any automated verification that the implementer agent may have missed or tha
 - Linting/formatting checks
 - Any other automated verification mentioned in the plan
 
-### 4. Report to Human
-Provide a clear summary of the phase completion:
+### 4. Report Progress
+Record a clear summary of the phase completion:
 ```
 ## Phase [N] Implementation Summary
 
@@ -52,24 +52,19 @@ Provide a clear summary of the phase completion:
 **Automated verification results:**
 - [Results of automated checks you performed]
 
-**Manual verification required:**
-- [List manual checks the human needs to perform]
-
-Ready to proceed to Phase [N+1] after manual verification, or let me know if any issues need addressing.
+**Manual verification noted for PR review (not blocking):**
+- [List manual checks a human reviewer should perform]
 ```
 
-### 5. Wait for Human Confirmation
-Wait for the human to:
-- Confirm manual checks passed
-- Report any issues found
-- Give permission to continue to the next phase
+### 5. Proceed Automatically
+You run unattended — no human is present mid-run. Automated verification (step 3) is the only gate. If it passes, move straight to the next phase. If it fails and isn't fixable, treat it as an andon condition (see below) and stop.
 
 ### 6. Commit the changes
 - Create a new commit for the changes
 - remember - the `.twinpod/` directory is gitignored and should not be committed; it holds working artifacts only
 
 ### 7. Repeat for Next Phase
-When prompted, repeat this workflow for the next phase.
+Repeat this workflow for the next phase immediately, without waiting to be prompted.
 
 ## Special Instructions
 
@@ -80,28 +75,21 @@ If resuming work on a partially completed plan:
 - Trust that completed work is done unless something seems off
 
 ### Handling Issues
-If the implementer agent reports a mismatch or gets stuck:
-- Present the issue clearly to the human
-- Wait for guidance before proceeding
-- Consider if the plan needs updating based on codebase evolution
+If the implementer agent reports a mismatch or gets stuck, that's an andon condition: stop, explain clearly why the plan can't be followed as written, and end the run rather than guessing or shipping broken work. There is no human to ask mid-run.
 
 ### Multiple Phases
-If instructed to implement multiple phases consecutively:
-- Still launch separate implementer agents for each phase
+Twinpod always runs implement-plan unattended across the full plan:
+- Launch a separate implementer agent for each phase
 - Perform verification between phases
-- Report summary after all requested phases complete
-- Only pause for human verification after the final phase
-
-### Waiting for Input
-- unless expressly asked, don't commit or proceed to a next phase until the human has reviewed and approved the previous phase
+- Do not pause between phases — proceed straight from one phase to the next
+- Report a summary after all phases complete
 
 Workflow checklist:
 
 - [ ] get plan path
 - [ ] launch implementer subagent
 - [ ] review its work
-- [ ] ask the human to perform manual verification
-- [ ] iterate with the human until the results are satisfactory
+- [ ] perform automated checks
 - [ ] commit the changes
 - [ ] launch implementer subagent for next phase
 
@@ -119,9 +107,9 @@ When ALL phases are complete and verified (all checkboxes marked, all automated 
 ## Getting Started
 
 When invoked:
-1. Ask for the plan path if not provided
+1. Locate the plan path if not provided directly (see step 0 above)
 2. Read the plan to understand the phases
 3. Begin with Phase 1 (or first unchecked phase if resuming)
 4. Follow the workflow above
 
-Remember: Your role is orchestration and verification. The implementer agent does the actual implementation work. Your job is to ensure quality, perform additional checks, and communicate clearly with the human.
+Remember: Your role is orchestration and verification. The implementer agent does the actual implementation work. Your job is to ensure quality and perform additional checks — this run is unattended, so don't wait on a human at any point; an andon condition is the only thing that should stop you short of completion.
