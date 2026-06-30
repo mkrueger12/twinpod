@@ -33,11 +33,33 @@ export class SdkOpenCodeRunner implements OpenCodeRunner {
       query: { directory: input.worktreePath },
       body: {
         agent: "general",
-        parts: [{ type: "text", text: input.prompt }],
-        format: { type: "json_schema", schema: classificationSchema(), retryCount: 2 },
+        parts: [{ type: "text", text: `${input.prompt}\n\nReturn exactly one raw JSON object. Do not include markdown fences, commentary, or extra text.` }],
       },
     });
-    return normalizeClassification(extractStructuredOutput(result) ?? parseJsonFromText(extractText(result)));
+    const firstText = extractTextOrThrow(result);
+    try {
+      return normalizeClassification(parseJsonFromText(firstText));
+    } catch {
+      const repair = await call(client, ["session", "prompt"], {
+        path: { id: session.id },
+        query: { directory: input.worktreePath },
+        body: {
+          agent: "general",
+          parts: [
+            {
+              type: "text",
+              text: `Your previous classifier response was not valid Twinpod classification JSON. Convert it to exactly one raw JSON object with keys runnable, class, risk, model_tier, confidence, and reasons. No markdown. Previous response:\n\n${firstText}`,
+            },
+          ],
+        },
+      });
+      const repairText = extractTextOrThrow(repair);
+      try {
+        return normalizeClassification(parseJsonFromText(repairText));
+      } catch (error) {
+        throw new Error(`Classifier response did not contain valid JSON. First response: ${firstText.slice(0, 2000)}\nRepair response: ${repairText.slice(0, 2000)}`);
+      }
+    }
   }
 
   async runPhase(input: PhaseRunInput): Promise<PhaseRunResult> {
@@ -82,22 +104,6 @@ export class SdkOpenCodeRunner implements OpenCodeRunner {
   }
 }
 
-function classificationSchema() {
-  return {
-    type: "object",
-    properties: {
-      runnable: { type: "boolean" },
-      class: { type: "string", enum: ["feature", "bug", "refactor", "docs", "chore", "unclear", "risky"] },
-      risk: { type: "string", enum: ["low", "medium", "high"] },
-      model_tier: { type: "string" },
-      confidence: { type: "number", minimum: 0, maximum: 1 },
-      reasons: { type: "array", items: { type: "string" } },
-    },
-    required: ["runnable", "class", "risk", "confidence", "reasons"],
-    additionalProperties: false,
-  };
-}
-
 function normalizeClassification(value: unknown): Classification {
   if (!value || typeof value !== "object") throw new Error("Classifier did not return a JSON object");
   const record = value as Record<string, unknown>;
@@ -116,12 +122,6 @@ function normalizeClassification(value: unknown): Classification {
   };
 }
 
-function extractStructuredOutput(value: unknown): unknown {
-  const unwrapped = unwrap<Record<string, unknown>>(value as AnyResponse<Record<string, unknown>>);
-  const info = unwrapped.info as Record<string, unknown> | undefined;
-  return info?.structured_output ?? info?.structuredOutput;
-}
-
 function parseJsonFromText(text: string): unknown {
   const direct = text.trim();
   if (direct.startsWith("{")) return JSON.parse(direct);
@@ -130,6 +130,15 @@ function parseJsonFromText(text: string): unknown {
   const object = /\{[\s\S]*\}/.exec(text);
   if (object) return JSON.parse(object[0]);
   throw new Error("Classifier response did not contain JSON");
+}
+
+function extractTextOrThrow(value: unknown): string {
+  const text = extractText(value);
+  if (text) return text;
+  const unwrapped = unwrap<{ info?: { error?: unknown }; error?: unknown }>(value as AnyResponse<{ info?: { error?: unknown }; error?: unknown }>);
+  const error = unwrapped.info?.error ?? unwrapped.error;
+  if (error) throw new Error(`OpenCode classifier failed: ${JSON.stringify(error)}`);
+  throw new Error(`OpenCode classifier returned no text: ${JSON.stringify(value).slice(0, 2000)}`);
 }
 
 function extractText(value: unknown): string {

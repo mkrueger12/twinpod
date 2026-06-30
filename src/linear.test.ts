@@ -29,6 +29,29 @@ describe("LinearClient", () => {
     });
   });
 
+  it("supports project slug and assignee filters from Able workflow config", async () => {
+    const requests: unknown[] = [];
+    const client = new LinearClient(
+      { apiKey: "lin_api_key" },
+      async (_url, init) => {
+        requests.push(JSON.parse(String(init?.body)));
+        return jsonResponse({ data: { issues: { nodes: [] } } });
+      },
+    );
+
+    await client.qualifyingIssues({ project_slug: "agent-v2-e6613e94140b", statuses: ["Todo", "Rework"], assignee: "me" });
+
+    expect(requests[0]).toMatchObject({
+      variables: {
+        filter: {
+          project: { slugId: { eq: "agent-v2-e6613e94140b" } },
+          state: { name: { in: ["Todo", "Rework"] } },
+          assignee: { isMe: { eq: true } },
+        },
+      },
+    });
+  });
+
   it("transitions by resolving the named team state", async () => {
     const mutations: unknown[] = [];
     const issue: LinearIssue = {

@@ -13,10 +13,13 @@ export class LinearClient {
 
   async qualifyingIssues(source: IntakeSource): Promise<LinearIssue[]> {
     const filter: Record<string, unknown> = {
-      project: { name: { eq: source.project } },
       state: { name: { in: source.statuses } },
     };
+    if (source.project_slug) filter.project = { slugId: { eq: source.project_slug } };
+    else if (source.project) filter.project = { name: { eq: source.project } };
     if (source.team) filter.team = { key: { eq: source.team } };
+    if (source.assignee === "me") filter.assignee = { isMe: { eq: true } };
+    else if (source.assignee) filter.assignee = { name: { eq: source.assignee } };
     if (source.labels && source.labels.length > 0) filter.labels = { name: { in: source.labels } };
     if (source.priority_min !== undefined) filter.priority = { gte: source.priority_min };
 

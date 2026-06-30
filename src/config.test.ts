@@ -15,6 +15,14 @@ describe("loadRepoConfig", () => {
     expect(config.agents.has("design-agent")).toBe(true);
   });
 
+  it("accepts Linear project slugs as the source binding", async () => {
+    const repo = await fixtureRepo({ projectKey: "project_slug", projectValue: "agent-v2-e6613e94140b" });
+
+    const config = await loadRepoConfig(repo);
+
+    expect(config.twinpod.intake.sources[0]?.project_slug).toBe("agent-v2-e6613e94140b");
+  });
+
   it("hard-fails when a workflow references a missing agent", async () => {
     const repo = await fixtureRepo({ agentName: "other-agent" });
 
@@ -28,7 +36,7 @@ describe("loadRepoConfig", () => {
   });
 });
 
-async function fixtureRepo(options: { agentName?: string; promptPath?: string } = {}): Promise<string> {
+async function fixtureRepo(options: { agentName?: string; promptPath?: string; projectKey?: string; projectValue?: string } = {}): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "twinpod-config-"));
   await mkdir(path.join(repo, "workflows"), { recursive: true });
   await mkdir(path.join(repo, "prompts"), { recursive: true });
@@ -38,7 +46,7 @@ async function fixtureRepo(options: { agentName?: string; promptPath?: string } 
     `intake:
   poll_interval: 30s
   sources:
-    - project: Twinpod Backlog
+    - ${options.projectKey ?? "project"}: ${options.projectValue ?? "Twinpod Backlog"}
       statuses: [Ready for Agent]
   claim:
     in_progress: "Agent: In Progress"

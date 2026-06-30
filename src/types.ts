@@ -3,9 +3,11 @@ export type IssueClass = "feature" | "bug" | "refactor" | "docs" | "chore" | "un
 export type RiskLevel = "low" | "medium" | "high" | string;
 
 export type IntakeSource = {
-  project: string;
+  project?: string;
+  project_slug?: string;
   statuses: string[];
   team?: string;
+  assignee?: string;
   labels?: string[];
   priority_min?: number;
 };

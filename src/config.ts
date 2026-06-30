@@ -48,12 +48,16 @@ function parseTwinpodConfig(value: unknown, repoRoot: string, configPath: string
   if (!Array.isArray(sourcesValue)) throw new Error(`${configPath}: intake.sources must be an array`);
   const sources = sourcesValue.map((source, index) => {
     const sourceRecord = requireRecord(source, `${configPath}: intake.sources[${index}]`);
-    const project = requireString(sourceRecord.project, `${configPath}: intake.sources[${index}].project`);
+    const project = optionalString(sourceRecord.project);
+    const project_slug = optionalString(sourceRecord.project_slug);
+    if (!project && !project_slug) throw new Error(`${configPath}: intake.sources[${index}] must set project or project_slug`);
     const statuses = requireStringArray(sourceRecord.statuses, `${configPath}: intake.sources[${index}].statuses`);
     return {
       project,
+      project_slug,
       statuses,
       team: optionalString(sourceRecord.team),
+      assignee: optionalString(sourceRecord.assignee),
       labels: optionalStringArray(sourceRecord.labels),
       priority_min: optionalNumber(sourceRecord.priority_min),
     };
