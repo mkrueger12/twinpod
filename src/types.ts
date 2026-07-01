@@ -92,6 +92,7 @@ export type PhaseRunInput = {
   phase: WorkflowPhase;
   agent: string;
   prompt: string;
+  signal?: AbortSignal;
 };
 
 export type PhaseRunResult = {

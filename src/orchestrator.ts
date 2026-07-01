@@ -56,7 +56,10 @@ export class Orchestrator {
       }
     }
     await this.stopIssuesThatNoLongerQualify();
-    while (this.activeIssues.size > 0 && this.options.once) await sleep(250, this.options.signal);
+    while (this.activeIssues.size > 0 && this.options.once) {
+      await sleep(250, this.options.signal);
+      await this.stopIssuesThatNoLongerQualify();
+    }
   }
 
   private async stopIssuesThatNoLongerQualify(): Promise<void> {
@@ -102,7 +105,7 @@ export class Orchestrator {
   private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string, signal: AbortSignal): Promise<void> {
     for (const phase of workflow.phases) {
       if (signal.aborted) throw new Error("Stopped before workflow completed");
-      await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir);
+      await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir, signal);
     }
     const prUrl = await currentPrUrl(worktreePath);
     if (!prUrl) {
@@ -121,6 +124,7 @@ export class Orchestrator {
     phase: WorkflowPhase,
     worktreePath: string,
     runDir: string,
+    signal: AbortSignal,
   ): Promise<void> {
     const markerPath = path.join(runDir, `${phase.id}.done.json`);
     if (existsSync(markerPath)) {
@@ -132,10 +136,11 @@ export class Orchestrator {
     const maxCycles = phase.loop_until === "ci_green" ? phase.cycles ?? 1 : 1;
     let prompt = renderPhasePrompt({ template: promptDef.template, worktreePath, runDir, issue, phase });
     for (let cycle = 1; cycle <= maxCycles; cycle++) {
+      if (signal.aborted) throw new Error(`Stopped mid-phase ${phase.id}`);
       this.options.logger.info("Running phase", { issue: issue.identifier, phase: phase.id, cycle, maxCycles });
       this.emitIssue(repo, issue, { stage: "running phase", phase: phase.id, cycle, maxCycles });
       await assertDeclaredReads(runDir, phase);
-      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, phase, agent: promptDef.agent, prompt });
+      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, phase, agent: promptDef.agent, prompt, signal });
       this.emitIssue(repo, issue, { stage: "phase response received", phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
       await writeFile(path.join(runDir, `${phase.id}.response.md`), result.text || "(no text response)\n", "utf8");
       await ensureDeclaredWrites(runDir, phase, result.text);

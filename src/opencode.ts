@@ -25,18 +25,28 @@ export class SdkOpenCodeRunner implements OpenCodeRunner {
       await call(client, ["session", "create"], {
         query: { directory: input.worktreePath },
         body: { title: `${input.issue.identifier} ${input.phase.id}` },
+        signal: input.signal,
       }) as AnyResponse<{ id: string }>,
     );
-    const result = await call(client, ["session", "prompt"], {
-      path: { id: session.id },
-      query: { directory: input.worktreePath },
-      body: {
-        agent: input.agent,
-        parts: [{ type: "text", text: input.prompt }],
-      },
-    });
-    const unwrapped = unwrap<{ info?: { cost?: number }; parts?: unknown[] }>(result as AnyResponse<{ info?: { cost?: number }; parts?: unknown[] }>);
-    return { text: extractText(unwrapped), costUsd: unwrapped.info?.cost };
+    const onAbort = () => {
+      call(client, ["session", "abort"], { path: { id: session.id }, query: { directory: input.worktreePath } }).catch(() => {});
+    };
+    input.signal?.addEventListener("abort", onAbort, { once: true });
+    try {
+      const result = await call(client, ["session", "prompt"], {
+        path: { id: session.id },
+        query: { directory: input.worktreePath },
+        body: {
+          agent: input.agent,
+          parts: [{ type: "text", text: input.prompt }],
+        },
+        signal: input.signal,
+      });
+      const unwrapped = unwrap<{ info?: { cost?: number }; parts?: unknown[] }>(result as AnyResponse<{ info?: { cost?: number }; parts?: unknown[] }>);
+      return { text: extractText(unwrapped), costUsd: unwrapped.info?.cost };
+    } finally {
+      input.signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   async close(): Promise<void> {
