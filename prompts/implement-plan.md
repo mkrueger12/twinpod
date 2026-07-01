@@ -1,5 +1,5 @@
 ---
-agent: implement-plan-agent
+agent: plan-manager-agent
 ---
 Use the implement-plan skill in worktree {{worktree_path}} for Linear issue {{issue_id}}.
 

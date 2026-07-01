@@ -2,8 +2,8 @@
 description: |
   Implements technical plans from .twinpod/. Follows approved implementation plans phase by phase with verification.
 mode: subagent
-model: openai/gpt-5.5
-variant: medium
+model: opencode/deepseek-v4-flash-free
+variant: max
 permission:
   edit: allow
   bash: allow
