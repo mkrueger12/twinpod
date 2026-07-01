@@ -4,10 +4,10 @@ import path from "node:path";
 import { currentPrUrl, runCi } from "./ci.js";
 import { parseDurationMs, sleep } from "./duration.js";
 import { LinearClient } from "./linear.js";
-import { classificationPrompt, issueMarkdown, phaseGuardPrompt, renderPhasePrompt } from "./prompts.js";
+import { issueMarkdown, phaseGuardPrompt, renderPhasePrompt } from "./prompts.js";
 import { errorOutput } from "./process.js";
 import { ensureIssueWorktree, materializeStageLibrary } from "./worktree.js";
-import type { Classification, LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary, Workflow, WorkflowPhase } from "./types.js";
+import type { LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary, Workflow, WorkflowPhase } from "./types.js";
 
 export class Orchestrator {
   private readonly activeIssueIds = new Set<string>();
@@ -63,25 +63,7 @@ export class Orchestrator {
       await materializeStageLibrary(worktree.path, this.options.stageLibrary);
       await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue), "utf8");
 
-      this.emitIssue(repo, issue, { stage: "classifying" });
-      const classification = await this.loadOrCreateClassification(repo, issue, worktree.path, worktree.runDir);
-      await writeFile(path.join(worktree.runDir, "classification.json"), `${JSON.stringify(classification, null, 2)}\n`, "utf8");
-      await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue, classification), "utf8");
-
-      if (!classification.runnable || classification.class === "unclear" || classification.class === "risky") {
-        this.emitIssue(repo, issue, { stage: "needs human input", workflow: classification.class });
-        await this.escalateNotRunnable(repo, issue, classification);
-        return;
-      }
-
-      const workflow = repo.workflows.get(classification.class) ?? repo.workflows.get("default");
-      if (!workflow) {
-        this.emitIssue(repo, issue, { stage: "failed", workflow: classification.class });
-        await this.fail(repo, issue, `No workflow configured for classifier class ${classification.class}, and no default workflow is defined`);
-        return;
-      }
-
-      await this.runWorkflow(repo, issue, workflow, worktree.path, worktree.runDir);
+      await this.runWorkflow(repo, issue, repo.workflow, worktree.path, worktree.runDir);
     } catch (error) {
       this.emitIssue(repo, issue, { stage: "failed" });
       this.options.logger.error("Issue run failed", { issue: issue.identifier, error: errorOutput(error) });
@@ -93,7 +75,7 @@ export class Orchestrator {
 
   private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string): Promise<void> {
     for (const phase of workflow.phases) {
-      await this.runPhaseWithGate(repo, issue, workflow, phase, worktreePath, runDir);
+      await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir);
     }
     const prUrl = await currentPrUrl(worktreePath);
     if (!prUrl) {
@@ -109,35 +91,34 @@ export class Orchestrator {
   private async runPhaseWithGate(
     repo: RepoRuntimeConfig,
     issue: LinearIssue,
-    workflow: Workflow,
     phase: WorkflowPhase,
     worktreePath: string,
     runDir: string,
   ): Promise<void> {
     const markerPath = path.join(runDir, `${phase.id}.done.json`);
     if (existsSync(markerPath)) {
-      this.options.logger.info("Skipping completed phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id });
+      this.options.logger.info("Skipping completed phase", { issue: issue.identifier, phase: phase.id });
       return;
     }
     const promptDef = this.options.stageLibrary.prompts.get(phase.prompt);
     if (!promptDef) throw new Error(`Phase ${phase.id} references prompt ${phase.prompt}, which is not defined in twinpod's prompts/`);
-    const maxCycles = phase.loop_until === "ci_green" ? phase.budget?.cycles ?? 1 : 1;
+    const maxCycles = phase.loop_until === "ci_green" ? phase.cycles ?? 1 : 1;
     let prompt = renderPhasePrompt({ template: promptDef.template, worktreePath, runDir, issue, phase });
     for (let cycle = 1; cycle <= maxCycles; cycle++) {
-      this.options.logger.info("Running phase", { issue: issue.identifier, workflow: workflow.class, phase: phase.id, cycle, maxCycles });
-      this.emitIssue(repo, issue, { stage: "running phase", workflow: workflow.class, phase: phase.id, cycle, maxCycles });
+      this.options.logger.info("Running phase", { issue: issue.identifier, phase: phase.id, cycle, maxCycles });
+      this.emitIssue(repo, issue, { stage: "running phase", phase: phase.id, cycle, maxCycles });
       await assertDeclaredReads(runDir, phase);
-      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, workflow, phase, agent: promptDef.agent, prompt });
-      this.emitIssue(repo, issue, { stage: "phase response received", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
+      const result = await this.options.openCode.runPhase({ repoRoot: repo.repoRoot, worktreePath, issue, phase, agent: promptDef.agent, prompt });
+      this.emitIssue(repo, issue, { stage: "phase response received", phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
       await writeFile(path.join(runDir, `${phase.id}.response.md`), result.text || "(no text response)\n", "utf8");
       await ensureDeclaredWrites(runDir, phase, result.text);
 
       if (phase.loop_until === "ci_green" || phase.gate === "ci_green") {
-        this.emitIssue(repo, issue, { stage: "running ci", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
+        this.emitIssue(repo, issue, { stage: "running ci", phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
         const ci = await runCi(worktreePath, repo.twinpod.ci?.command);
         await writeFile(path.join(runDir, `${phase.id}.ci.${cycle}.log`), `Command: ${ci.command ?? "none"}\nOK: ${ci.ok}\n\n${ci.output}`, "utf8");
         if (ci.ok) {
-          this.emitIssue(repo, issue, { stage: "ci green", workflow: workflow.class, phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
+          this.emitIssue(repo, issue, { stage: "ci green", phase: phase.id, cycle, maxCycles, costUsd: result.costUsd });
           await writePhaseMarker(markerPath, phase, cycle);
           return;
         }
@@ -148,26 +129,6 @@ export class Orchestrator {
       await writePhaseMarker(markerPath, phase, cycle);
       return;
     }
-  }
-
-  private async loadOrCreateClassification(repo: RepoRuntimeConfig, issue: LinearIssue, worktreePath: string, runDir: string): Promise<Classification> {
-    const classificationPath = path.join(runDir, "classification.json");
-    if (existsSync(classificationPath)) return JSON.parse(await readFile(classificationPath, "utf8")) as Classification;
-    return this.options.openCode.classify({
-      issue,
-      repoRoot: repo.repoRoot,
-      worktreePath,
-      prompt: classificationPrompt(issue),
-    });
-  }
-
-  private async escalateNotRunnable(repo: RepoRuntimeConfig, issue: LinearIssue, classification: Classification): Promise<void> {
-    await this.options.linear.commentIssue(
-      issue.id,
-      `Twinpod did not run this issue.\n\nClassification: ${classification.class}\nRisk: ${classification.risk}\nConfidence: ${classification.confidence}\nReasons:\n${classification.reasons.map((reason) => `- ${reason}`).join("\n")}`,
-    );
-    await this.options.linear.transitionIssue(issue, repo.twinpod.intake.claim.needs_info ?? repo.twinpod.intake.claim.failed);
-    this.emit({ type: "issue.completed", issueId: issue.id, identifier: issue.identifier, stage: "needs human input", at: new Date().toISOString() });
   }
 
   private async fail(repo: RepoRuntimeConfig, issue: LinearIssue, body: string): Promise<void> {

@@ -21,10 +21,10 @@ export async function loadRepoConfig(repoRootInput: string, stageLibrary: StageL
   const configPath = path.join(repoRoot, "twinpod.yaml");
   if (!existsSync(configPath)) throw new Error(`Missing twinpod.yaml in ${repoRoot}`);
 
-  const parsed = YAML.parse(await readFile(configPath, "utf8")) as unknown;
+  const parsed = requireRecord(YAML.parse(await readFile(configPath, "utf8")), configPath);
   const twinpod = parseTwinpodConfig(parsed, repoRoot, configPath);
-  const workflows = await loadWorkflows(repoRoot);
-  const config: RepoRuntimeConfig = { repoRoot, twinpod, workflows };
+  const workflow = parseWorkflow(parsed.workflow, configPath);
+  const config: RepoRuntimeConfig = { repoRoot, twinpod, workflow };
   validateRepoConfig(config, stageLibrary);
   return config;
 }
@@ -37,16 +37,11 @@ export function validateRepoConfig(config: RepoRuntimeConfig, stageLibrary: Stag
   if (config.twinpod.intake.sources.length === 0) {
     throw new Error(`${config.repoRoot}: intake.sources must contain at least one source`);
   }
-  if (config.workflows.size === 0) {
-    throw new Error(`${config.repoRoot}: workflows/*.yaml must define at least one workflow`);
-  }
 
   const missing: string[] = [];
-  for (const workflow of config.workflows.values()) {
-    workflow.phases.forEach((phase) => {
-      if (!stageLibrary.prompts.has(phase.prompt)) missing.push(`prompt ${phase.prompt} referenced by ${path.relative(config.repoRoot, workflow.filePath)} phase ${phase.id} is not defined in twinpod's prompts/`);
-    });
-  }
+  config.workflow.phases.forEach((phase) => {
+    if (!stageLibrary.prompts.has(phase.prompt)) missing.push(`prompt ${phase.prompt} referenced by workflow.phases[${phase.id}] is not defined in twinpod's prompts/`);
+  });
   if (missing.length > 0) throw new Error(`${config.repoRoot}: invalid workflow references:\n${missing.map((entry) => `- ${entry}`).join("\n")}`);
 }
 
@@ -103,23 +98,12 @@ function parseTwinpodConfig(value: unknown, repoRoot: string, configPath: string
   return twinpod;
 }
 
-async function loadWorkflows(repoRoot: string): Promise<Map<string, Workflow>> {
-  const workflowsDir = path.join(repoRoot, "workflows");
-  const workflows = new Map<string, Workflow>();
-  if (!existsSync(workflowsDir)) return workflows;
-  const entries = await readdir(workflowsDir, { withFileTypes: true });
-  for (const entry of entries) {
-    if (!entry.isFile() || !/\.ya?ml$/i.test(entry.name)) continue;
-    const filePath = path.join(workflowsDir, entry.name);
-    const workflowRecord = requireRecord(YAML.parse(await readFile(filePath, "utf8")), filePath);
-    const workflowClass = requireString(workflowRecord.class, `${filePath}: class`);
-    if (workflows.has(workflowClass)) throw new Error(`${repoRoot}: duplicate workflow for class ${workflowClass}`);
-    const phasesValue = workflowRecord.phases;
-    if (!Array.isArray(phasesValue) || phasesValue.length === 0) throw new Error(`${filePath}: phases must be a non-empty array`);
-    const phases = phasesValue.map((phase, index) => parsePhase(phase, `${filePath}: phases[${index}]`));
-    workflows.set(workflowClass, { filePath, class: workflowClass, phases });
-  }
-  return workflows;
+function parseWorkflow(value: unknown, configPath: string): Workflow {
+  const workflowRecord = requireRecord(value, `${configPath}: workflow`);
+  const phasesValue = workflowRecord.phases;
+  if (!Array.isArray(phasesValue) || phasesValue.length === 0) throw new Error(`${configPath}: workflow.phases must be a non-empty array`);
+  const phases = phasesValue.map((phase, index) => parsePhase(phase, `${configPath}: workflow.phases[${index}]`));
+  return { phases };
 }
 
 function parsePhase(value: unknown, context: string): WorkflowPhase {
@@ -131,13 +115,8 @@ function parsePhase(value: unknown, context: string): WorkflowPhase {
     writes: optionalStringArray(phase.writes),
     gate: optionalString(phase.gate),
     loop_until: optionalString(phase.loop_until),
-    budget: phase.budget === undefined ? undefined : parseBudget(phase.budget, `${context}.budget`),
+    cycles: optionalNumber(phase.cycles),
   };
-}
-
-function parseBudget(value: unknown, context: string) {
-  const budget = requireRecord(value, context);
-  return { usd: optionalNumber(budget.usd), cycles: optionalNumber(budget.cycles) };
 }
 
 async function readAgents(twinpodRoot: string): Promise<{ agents: Set<string>; agentFiles: Map<string, string> }> {

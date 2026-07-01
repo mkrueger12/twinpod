@@ -1,5 +1,5 @@
 import path from "node:path";
-import type { Classification, LinearIssue, WorkflowPhase } from "./types.js";
+import type { LinearIssue, WorkflowPhase } from "./types.js";
 
 export function renderPhasePrompt(input: {
   template: string;
@@ -22,28 +22,7 @@ export function renderPhasePrompt(input: {
   });
 }
 
-export function classificationPrompt(issue: LinearIssue): string {
-  return `Classify this Linear issue for Twinpod.
-
-Return JSON with exactly these fields:
-- runnable: boolean
-- class: one of feature, bug, refactor, docs, chore, unclear, risky
-- risk: one of low, medium, high
-- model_tier: optional string
-- confidence: number from 0 to 1
-- reasons: string[]
-
-Mark runnable false for unclear or risky work that should not be attempted autonomously.
-
-Issue ID: ${issue.identifier}
-Title: ${issue.title}
-URL: ${issue.url ?? ""}
-Priority: ${issue.priority ?? ""}
-Description:
-${issue.description ?? ""}`;
-}
-
-export function issueMarkdown(issue: LinearIssue, classification?: Classification): string {
+export function issueMarkdown(issue: LinearIssue): string {
   const labels = issue.labels?.nodes.map((label) => label.name).join(", ") ?? "";
   return `# ${issue.identifier}: ${issue.title}
 
@@ -54,7 +33,6 @@ export function issueMarkdown(issue: LinearIssue, classification?: Classificatio
 - Team: ${issue.team.key ?? issue.team.name ?? issue.team.id}
 - Priority: ${issue.priority ?? ""}
 - Labels: ${labels}
-${classification ? `- Classification: ${classification.class} / ${classification.risk} / confidence ${classification.confidence}` : ""}
 
 ## Description
 

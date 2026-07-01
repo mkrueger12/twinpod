@@ -15,3 +15,21 @@ intake:
 
 ci:
   command: npm run check
+
+workflow:
+  phases:
+    - id: research-questions
+      prompt: research-questions
+      reads: [issue.md]
+    - id: research
+      prompt: research
+    - id: plan
+      prompt: plan
+    - id: implement-plan
+      prompt: implement-plan
+      loop_until: ci_green
+      cycles: 6
+    - id: ship
+      prompt: ship
+      reads: [issue.md]
+      gate: ci_green

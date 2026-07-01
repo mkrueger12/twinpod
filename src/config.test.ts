@@ -23,7 +23,7 @@ describe("loadStageLibrary", () => {
 });
 
 describe("loadRepoConfig", () => {
-  it("loads repo-local config and workflows, validated against the central stage library", async () => {
+  it("loads repo-local config and workflow, validated against the central stage library", async () => {
     const twinpodRoot = await fixtureStageLibrary();
     const stageLibrary = await loadStageLibrary(twinpodRoot);
     const repo = await fixtureRepo();
@@ -32,7 +32,7 @@ describe("loadRepoConfig", () => {
 
     expect(config.repoRoot).toBe(repo);
     expect(config.twinpod.intake.sources[0]?.project).toBe("Twinpod Backlog");
-    expect(config.workflows.get("feature")?.phases[0]?.prompt).toBe("design");
+    expect(config.workflow.phases[0]?.prompt).toBe("design");
   });
 
   it("accepts Linear project slugs as the source binding", async () => {
@@ -50,7 +50,7 @@ describe("loadRepoConfig", () => {
     const stageLibrary = await loadStageLibrary(twinpodRoot);
     const repo = await fixtureRepo({ promptName: "missing-prompt" });
 
-    await expect(loadRepoConfig(repo, stageLibrary)).rejects.toThrow(/prompt missing-prompt referenced by workflows\/feature.yaml phase design/);
+    await expect(loadRepoConfig(repo, stageLibrary)).rejects.toThrow(/prompt missing-prompt referenced by workflow.phases\[design\]/);
   });
 });
 
@@ -69,7 +69,6 @@ async function fixtureStageLibrary(options: { promptAgent?: string } = {}): Prom
 
 async function fixtureRepo(options: { promptName?: string; projectKey?: string; projectValue?: string } = {}): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "twinpod-config-"));
-  await mkdir(path.join(repo, "workflows"), { recursive: true });
   await writeFile(
     path.join(repo, "twinpod.yaml"),
     `intake:
@@ -81,17 +80,13 @@ async function fixtureRepo(options: { promptName?: string; projectKey?: string; 
     in_progress: "Agent: In Progress"
     review: "Agent: In Review"
     failed: "Agent: Needs Attention"
-`,
-    "utf8",
-  );
-  await writeFile(
-    path.join(repo, "workflows", "feature.yaml"),
-    `class: feature
-phases:
-  - id: design
-    prompt: ${options.promptName ?? "design"}
-    reads: [issue.md]
-    writes: [design.md]
+
+workflow:
+  phases:
+    - id: design
+      prompt: ${options.promptName ?? "design"}
+      reads: [issue.md]
+      writes: [design.md]
 `,
     "utf8",
   );

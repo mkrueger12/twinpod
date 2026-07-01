@@ -1,5 +1,5 @@
 ---
-model: anthropic/claude-sonnet-4-20250514
+model: openai/gpt-5.5
 permission:
   edit: deny
   bash: allow

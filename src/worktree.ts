@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { cp, mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, readdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runFile } from "./process.js";
 import { slugify } from "./slug.js";
@@ -33,6 +33,7 @@ export async function ensureIssueWorktree(repoRoot: string, issue: LinearIssue):
     if (await branchExists(repoRoot, branch)) await runFile("git", ["worktree", "add", worktreePath, branch], { cwd: repoRoot });
     else await runFile("git", ["worktree", "add", "-b", branch, worktreePath, "HEAD"], { cwd: repoRoot });
   }
+  await linkNodeModules(repoRoot, worktreePath);
   const runDir = path.join(worktreePath, ".twinpod", "runs", issue.id);
   await mkdir(runDir, { recursive: true });
   await ensureGitignore(worktreePath);
@@ -55,6 +56,27 @@ export async function cleanupMergedWorktrees(repoRoot: string): Promise<string[]
     removed.push(worktree.path);
   }
   return removed;
+}
+
+// `git worktree add` never installs dependencies, so freshly created worktrees are missing
+// node_modules (and any devDependency binaries like biome/eslint that CI commands need).
+// Symlinking from the source checkout is far cheaper than reinstalling per issue.
+async function linkNodeModules(repoRoot: string, worktreePath: string): Promise<void> {
+  await linkIfMissing(repoRoot, worktreePath, ".");
+  const entries = await readdir(repoRoot, { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === "node_modules" || entry.name.startsWith(".")) continue;
+    if (!existsSync(path.join(repoRoot, entry.name, "package.json"))) continue;
+    await linkIfMissing(repoRoot, worktreePath, entry.name);
+  }
+}
+
+async function linkIfMissing(repoRoot: string, worktreePath: string, relativeDir: string): Promise<void> {
+  const source = path.join(repoRoot, relativeDir, "node_modules");
+  const target = path.join(worktreePath, relativeDir, "node_modules");
+  if (!existsSync(source) || existsSync(target)) return;
+  await mkdir(path.dirname(target), { recursive: true });
+  await symlink(source, target, "dir");
 }
 
 async function ensureGitignore(worktreePath: string): Promise<void> {

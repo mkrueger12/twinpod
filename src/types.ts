@@ -1,7 +1,3 @@
-export type IssueClass = "feature" | "bug" | "refactor" | "docs" | "chore" | "unclear" | "risky" | string;
-
-export type RiskLevel = "low" | "medium" | "high" | string;
-
 export type IntakeSource = {
   project?: string;
   project_slug?: string;
@@ -37,11 +33,6 @@ export type TwinpodConfig = {
   };
 };
 
-export type Budget = {
-  usd?: number;
-  cycles?: number;
-};
-
 export type WorkflowPhase = {
   id: string;
   prompt: string;
@@ -49,19 +40,17 @@ export type WorkflowPhase = {
   writes?: string[];
   gate?: string;
   loop_until?: string;
-  budget?: Budget;
+  cycles?: number;
 };
 
 export type Workflow = {
-  filePath: string;
-  class: IssueClass;
   phases: WorkflowPhase[];
 };
 
 export type RepoRuntimeConfig = {
   repoRoot: string;
   twinpod: TwinpodConfig;
-  workflows: Map<string, Workflow>;
+  workflow: Workflow;
 };
 
 export type PromptDefinition = {
@@ -96,20 +85,10 @@ export type LinearIssue = {
   labels?: { nodes: Array<{ name: string }> };
 };
 
-export type Classification = {
-  runnable: boolean;
-  class: IssueClass;
-  risk: RiskLevel;
-  model_tier?: string;
-  confidence: number;
-  reasons: string[];
-};
-
 export type PhaseRunInput = {
   repoRoot: string;
   worktreePath: string;
   issue: LinearIssue;
-  workflow: Workflow;
   phase: WorkflowPhase;
   agent: string;
   prompt: string;
@@ -127,7 +106,6 @@ export type RuntimeIssueStatus = {
   url?: string | null;
   repoRoot: string;
   stage: string;
-  workflow?: string;
   phase?: string;
   cycle?: number;
   maxCycles?: number;
@@ -143,7 +121,6 @@ export type RuntimeEvent =
   | { type: "log"; level: "info" | "warn" | "error"; message: string; meta?: Record<string, unknown>; at: string };
 
 export interface OpenCodeRunner {
-  classify(input: { issue: LinearIssue; repoRoot: string; worktreePath: string; prompt: string }): Promise<Classification>;
   runPhase(input: PhaseRunInput): Promise<PhaseRunResult>;
   close(): Promise<void>;
 }

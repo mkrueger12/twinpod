@@ -21,9 +21,15 @@ type TuiRenderer = {
   destroy?: () => void | Promise<void>;
 };
 
+type TuiRepoInfo = {
+  repoRoot: string;
+  projects: string[];
+  pollInterval: string;
+};
+
 type TuiState = {
   startedAt: Date;
-  repos: string[];
+  repos: TuiRepoInfo[];
   active: Map<string, RuntimeIssueStatus>;
   logs: string[];
   lastPollAt?: string;
@@ -42,7 +48,11 @@ export async function runTui(options: {
   const core = await loadOpenTui();
   const state: TuiState = {
     startedAt: new Date(),
-    repos: options.repos.map((repo) => repo.repoRoot),
+    repos: options.repos.map((repo) => ({
+      repoRoot: repo.repoRoot,
+      projects: repo.twinpod.intake.sources.map((source) => source.project_slug ?? source.project ?? "any project"),
+      pollInterval: repo.twinpod.intake.poll_interval,
+    })),
     active: new Map(),
     logs: [],
     ticker: 0,
@@ -54,10 +64,10 @@ export async function runTui(options: {
     onDestroy: () => options.abort?.(new Error("TUI closed")),
   })) as TuiRenderer;
 
-  const header = core.Text({ content: "", fg: "#F5E0DC" }) as TuiRenderable;
-  const issues = core.Text({ content: "", fg: "#CDD6F4" }) as TuiRenderable;
-  const logs = core.Text({ content: "", fg: "#BAC2DE" }) as TuiRenderable;
-  const footer = core.Text({ content: "", fg: "#A6ADC8" }) as TuiRenderable;
+  const header = core.Text({ content: "" }) as TuiRenderable;
+  const issues = core.Text({ content: "" }) as TuiRenderable;
+  const logs = core.Text({ content: "" }) as TuiRenderable;
+  const footer = core.Text({ content: "" }) as TuiRenderable;
 
   renderer.root.add(
     core.Box(
@@ -67,11 +77,10 @@ export async function runTui(options: {
         flexDirection: "column",
         padding: 1,
         gap: 1,
-        backgroundColor: "#11111B",
       },
-      core.Box({ borderStyle: "rounded", borderColor: "#89B4FA", padding: 1, title: "Twinpod", titleColor: "#89B4FA" }, header),
-      core.Box({ borderStyle: "rounded", borderColor: "#A6E3A1", padding: 1, flexGrow: 1, title: "Current Work", titleColor: "#A6E3A1" }, issues),
-      core.Box({ borderStyle: "rounded", borderColor: "#FAB387", padding: 1, height: 10, title: "Live Log", titleColor: "#FAB387" }, logs),
+      core.Box({ borderStyle: "rounded", padding: 1, title: "Twinpod" }, header),
+      core.Box({ borderStyle: "rounded", padding: 1, flexGrow: 1, title: "Current Work" }, issues),
+      core.Box({ borderStyle: "rounded", padding: 1, height: 10, title: "Live Log" }, logs),
       footer,
     ),
   );
@@ -137,8 +146,16 @@ function handleEvent(state: TuiState, event: RuntimeEvent): void {
 
 function renderHeader(state: TuiState): string {
   const uptime = Math.max(0, Math.floor((Date.now() - state.startedAt.getTime()) / 1000));
-  const repoNames = state.repos.map((repo) => basename(repo)).join(", ");
-  return [`repos: ${repoNames}`, `active issues: ${state.active.size}`, `uptime: ${uptime}s`, `last poll: ${state.lastPollAt ? relativeTime(state.lastPollAt) : "not yet"}`].join("\n");
+  const repoLines = state.repos.map(
+    (repo) => `  ${basename(repo.repoRoot)} — ${repo.projects.join(", ")} (polling every ${repo.pollInterval})`,
+  );
+  return [
+    `repos:`,
+    ...repoLines,
+    `active issues: ${state.active.size}`,
+    `uptime: ${uptime}s`,
+    `last poll: ${state.lastPollAt ? relativeTime(state.lastPollAt) : "not yet"}`,
+  ].join("\n");
 }
 
 function renderIssues(state: TuiState): string {
@@ -148,7 +165,6 @@ function renderIssues(state: TuiState): string {
 
 function renderIssue(status: RuntimeIssueStatus, tick: number): string {
   const parts = [`${status.identifier}: ${status.title}`, `stage: ${status.stage} ${ticker(tick)}`];
-  if (status.workflow) parts.push(`workflow: ${status.workflow}`);
   if (status.phase) parts.push(`phase: ${status.phase}${status.cycle ? ` (${status.cycle}/${status.maxCycles ?? status.cycle})` : ""}`);
   parts.push(`repo: ${basename(status.repoRoot)}`);
   parts.push(`updated: ${relativeTime(status.updatedAt)}`);
