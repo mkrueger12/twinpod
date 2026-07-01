@@ -18,6 +18,7 @@ type CliOptions = {
   opencodeUrl?: string;
   opencodePort?: number;
   maxAgents?: number;
+  minFreeMemoryGb?: number;
 };
 
 async function main() {
@@ -60,7 +61,7 @@ async function main() {
   try {
     const linear = new LinearClient({ apiKey: linearApiKey, endpoint: linearEndpoint, pageSize });
     if (options.command === "tui") {
-      await runTui({ repos, stageLibrary, linear, openCode, once: options.once, concurrency: resolveMaxAgents(options, repos), signal: controller.signal, abort: (reason) => controller.abort(reason) });
+      await runTui({ repos, stageLibrary, linear, openCode, once: options.once, concurrency: resolveMaxAgents(options, repos), minFreeMemoryBytes: resolveMinFreeMemoryBytes(options), signal: controller.signal, abort: (reason) => controller.abort(reason) });
     } else {
       await new Orchestrator({
         repos,
@@ -70,6 +71,7 @@ async function main() {
         logger: consoleLogger,
         once: options.once,
         concurrency: resolveMaxAgents(options, repos),
+        minFreeMemoryBytes: resolveMinFreeMemoryBytes(options),
         signal: controller.signal,
       }).start();
     }
@@ -101,6 +103,8 @@ function parseArgs(args: string[]): CliOptions {
     else if (arg.startsWith("--opencode-port=")) options.opencodePort = Number(arg.slice("--opencode-port=".length));
     else if (arg === "--max-agents") options.maxAgents = parsePositiveInteger(requireValue(args, ++index, arg), arg);
     else if (arg.startsWith("--max-agents=")) options.maxAgents = parsePositiveInteger(arg.slice("--max-agents=".length), "--max-agents");
+    else if (arg === "--min-free-memory-gb") options.minFreeMemoryGb = parseNonNegativeNumber(requireValue(args, ++index, arg), arg);
+    else if (arg.startsWith("--min-free-memory-gb=")) options.minFreeMemoryGb = parseNonNegativeNumber(arg.slice("--min-free-memory-gb=".length), "--min-free-memory-gb");
     else if (arg === "--help" || arg === "-h") options.command = "help";
     else throw new Error(`Unknown argument: ${arg}`);
   }
@@ -111,6 +115,11 @@ function resolveMaxAgents(options: CliOptions, repos: RepoRuntimeConfig[]): numb
   if (options.maxAgents !== undefined) return options.maxAgents;
   const configured = repos.flatMap((repo) => (repo.twinpod.max_parallel_agents === undefined ? [] : [repo.twinpod.max_parallel_agents]));
   return configured.length > 0 ? Math.min(...configured) : undefined;
+}
+
+function resolveMinFreeMemoryBytes(options: CliOptions): number | undefined {
+  const value = options.minFreeMemoryGb ?? (process.env.TWINPOD_MIN_FREE_MEMORY_GB === undefined ? undefined : parseNonNegativeNumber(process.env.TWINPOD_MIN_FREE_MEMORY_GB, "TWINPOD_MIN_FREE_MEMORY_GB"));
+  return value === undefined ? undefined : value * 1024 * 1024 * 1024;
 }
 
 function resolveLinearApiKey(options: CliOptions, repos: RepoRuntimeConfig[]): string {
@@ -135,18 +144,25 @@ function parsePositiveInteger(value: string, flag: string): number {
   return parsed;
 }
 
+function parseNonNegativeNumber(value: string, flag: string): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`${flag} must be a non-negative number`);
+  return parsed;
+}
+
 function printHelp() {
   console.log(`Twinpod
 
 Usage:
-  twinpod serve [--repo PATH ...] [--once] [--max-agents N] [--linear-api-key KEY] [--opencode-url URL]
-  twinpod tui [--repo PATH ...] [--once] [--max-agents N] [--linear-api-key KEY] [--opencode-url URL]
+  twinpod serve [--repo PATH ...] [--once] [--max-agents N] [--min-free-memory-gb N] [--linear-api-key KEY] [--opencode-url URL]
+  twinpod tui [--repo PATH ...] [--once] [--max-agents N] [--min-free-memory-gb N] [--linear-api-key KEY] [--opencode-url URL]
   twinpod validate [--repo PATH ...]
   twinpod cleanup [--repo PATH ...]
 
 Environment:
   LINEAR_API_KEY          Linear API key, unless twinpod.yaml uses linear.api_key_env or linear.api_key
   OPENCODE_SERVER_URL     Existing opencode server URL. If omitted, Twinpod starts one through @opencode-ai/sdk.
+  TWINPOD_MIN_FREE_MEMORY_GB  RAM to keep free before starting another parallel issue agent. Set 0 to disable.
 `);
 }
 

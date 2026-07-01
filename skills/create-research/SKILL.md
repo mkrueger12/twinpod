@@ -5,7 +5,7 @@ description:  research the codebase
 
 # Research Codebase
 
-You are tasked with conducting comprehensive research across the codebase to answer user questions by spawning parallel sub-agents and synthesizing their findings.
+You are tasked with conducting comprehensive research across the codebase to answer user questions by spawning bounded parallel sub-agents and synthesizing their findings. Keep no more than 2 sub-agents running in parallel at any time; queue additional research tasks until one finishes.
 
 This skill is the second phase of the research → plan → implement flow: **create-research-questions → create-research → create-plan → implement-plan**. Its input is the research-questions document written by `create-research-questions`; its output (a research document) is read by `create-plan`.
 
@@ -46,8 +46,8 @@ Then wait for the user's research query.
    - Create a research plan that tracks all subtasks
    - Consider which directories, files, or architectural patterns are relevant
 
-3. **Spawn parallel sub-agent tasks for comprehensive research:**
-   - Create multiple Task agents to research different aspects concurrently
+3. **Spawn bounded parallel sub-agent tasks for comprehensive research:**
+   - Create Task agents to research different aspects, but keep no more than 2 active at the same time
    - We now have specialized agents that know how to do specific research tasks:
 
    **For codebase research:**
@@ -61,7 +61,8 @@ Then wait for the user's research query.
 
    The key is to use these agents intelligently:
    - **Combine related questions**: Don't necessarily launch one subagent per research question. Group related questions that touch the same area of the codebase into a single subagent prompt. For example, if 3 questions are about how the daemon handles sessions, combine them into one codebase-analyzer call.
-   - Aim for 2-6 well-scoped subagents rather than 1:1 question-to-agent mapping - this is not a hard rule, just guidance
+   - Aim for 2-6 well-scoped subagents in total rather than 1:1 question-to-agent mapping - this is not a hard rule, just guidance
+   - Dispatch subagents in waves of at most 2 concurrent active tasks; do not start a third until one of the running subagents finishes
    - Start with locator agents to find what exists
    - Then use analyzer agents on the most promising findings to document how they work
    - Run multiple agents in parallel when they're searching for **different areas** of the codebase
@@ -112,7 +113,7 @@ Then wait for the user's research query.
    - Update the frontmatter fields `last_updated` and `last_updated_by` to reflect the update
    - Add `last_updated_note: "Added follow-up research for [brief description]"` to frontmatter
    - Add a new section: `## Follow-up Research [timestamp]`
-   - Spawn new sub-agents as needed for additional investigation
+   - Spawn new sub-agents as needed for additional investigation, keeping the same maximum of 2 active sub-agents at a time
    - Continue updating the document 
 
 ## Document Style and Format
@@ -160,7 +161,7 @@ technical depth and thoroughness.
 
 <guidance>
 ## Important notes:
-- Use parallel Task agents to maximize efficiency and minimize context usage
+- Use bounded parallel Task agents to maximize efficiency and minimize context usage, with no more than 2 active sub-agents at a time
 - Focus on finding concrete file paths and line numbers for developer reference
 - Research documents should be self-contained with all necessary context
 - Each sub-agent prompt should be specific and focused on read-only documentation operations

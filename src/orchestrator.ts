@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { currentPrUrl, runCi } from "./ci.js";
 import { parseDurationMs, sleep } from "./duration.js";
@@ -13,12 +14,16 @@ type ActiveIssue = { identifier: string; controller: AbortController };
 type QueuedIssue = { repo: RepoRuntimeConfig; issue: LinearIssue; queuedAt: number };
 type PolledIssue = QueuedIssue & { order: number };
 
+const DEFAULT_MAX_PARALLEL_AGENTS = 1;
+const DEFAULT_MIN_FREE_MEMORY_BYTES = 2 * 1024 * 1024 * 1024;
+
 export class Orchestrator {
   private readonly activeIssues = new Map<string, ActiveIssue>();
   private readonly queuedIssues = new Map<string, QueuedIssue>();
   private readonly announcedQueuedIssueIds = new Set<string>();
   private lastQueuedOrderKey = "";
   private queueSequence = 0;
+  private memoryBackpressureActive = false;
 
   constructor(
     private readonly options: {
@@ -29,6 +34,9 @@ export class Orchestrator {
       logger: Logger;
       once?: boolean;
       concurrency?: number;
+      minFreeMemoryBytes?: number;
+      memorySnapshot?: () => { free: number; total: number };
+      currentPrUrl?: (worktreePath: string) => Promise<string | undefined>;
       signal?: AbortSignal;
       onEvent?: (event: RuntimeEvent) => void;
     },
@@ -102,6 +110,7 @@ export class Orchestrator {
 
   private drainIssueQueue(): void {
     while (!this.options.signal?.aborted && this.activeIssues.size < this.maxParallelAgents() && this.queuedIssues.size > 0) {
+      if (!this.hasCapacityForAnotherAgent()) return;
       const next = this.queuedIssues.entries().next().value;
       if (!next) return;
       const [issueId, queued] = next;
@@ -179,7 +188,7 @@ export class Orchestrator {
       if (signal.aborted) throw new Error("Stopped before workflow completed");
       await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir, signal);
     }
-    const prUrl = await currentPrUrl(worktreePath);
+    const prUrl = await (this.options.currentPrUrl ?? currentPrUrl)(worktreePath);
     if (!prUrl) {
       await this.fail(repo, issue, "Workflow completed, but no GitHub PR was found for the worktree branch. The ship phase must push/open a PR before Twinpod can move the issue to review.");
       return;
@@ -246,7 +255,28 @@ export class Orchestrator {
   }
 
   private maxParallelAgents(): number {
-    return Math.max(1, Math.floor(this.options.concurrency ?? 3));
+    return Math.max(1, Math.floor(this.options.concurrency ?? DEFAULT_MAX_PARALLEL_AGENTS));
+  }
+
+  private hasCapacityForAnotherAgent(): boolean {
+    if (this.activeIssues.size === 0 || this.maxParallelAgents() <= 1) return true;
+    const minFree = this.options.minFreeMemoryBytes ?? DEFAULT_MIN_FREE_MEMORY_BYTES;
+    if (minFree <= 0) return true;
+    const memory = this.options.memorySnapshot?.() ?? { free: os.freemem(), total: os.totalmem() };
+    if (memory.free >= minFree) {
+      this.memoryBackpressureActive = false;
+      return true;
+    }
+    if (!this.memoryBackpressureActive) {
+      this.memoryBackpressureActive = true;
+      this.options.logger.warn("Pausing queued issue starts until more RAM is available", {
+        active: this.activeIssues.size,
+        max: this.maxParallelAgents(),
+        freeGiB: (memory.free / 1024 / 1024 / 1024).toFixed(1),
+        requiredFreeGiB: (minFree / 1024 / 1024 / 1024).toFixed(1),
+      });
+    }
+    return false;
   }
 
   private emit(event: RuntimeEvent): void {

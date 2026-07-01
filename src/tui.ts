@@ -46,6 +46,7 @@ export async function runTui(options: {
   openCode: OpenCodeRunner;
   once?: boolean;
   concurrency?: number;
+  minFreeMemoryBytes?: number;
   signal?: AbortSignal;
   abort?: (reason?: unknown) => void;
 }): Promise<void> {
@@ -126,6 +127,7 @@ export async function runTui(options: {
       logger,
       once: options.once,
       concurrency: options.concurrency,
+      minFreeMemoryBytes: options.minFreeMemoryBytes,
       signal: options.signal,
       onEvent: (event) => handleEvent(state, event),
     }).start();

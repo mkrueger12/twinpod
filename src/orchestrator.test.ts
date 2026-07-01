@@ -175,7 +175,7 @@ describe("Orchestrator", () => {
     await run;
   }, 10_000);
 
-  it("defaults to three parallel issue runs and starts queued issues as slots free", async () => {
+  it("defaults to one parallel issue run and starts queued issues as slots free", async () => {
     const repoRoot = await initGitRepo();
     const issues = Array.from({ length: 5 }, (_, index) => makeIssue(index + 1));
     const transitions: string[] = [];
@@ -219,23 +219,186 @@ describe("Orchestrator", () => {
     });
 
     const run = orchestrator.start();
-    await waitFor(() => started.length === 3);
+    await waitFor(() => started.length === 1);
 
-    expect(started).toHaveLength(3);
-    expect(started).toEqual(expect.arrayContaining(["DEV-1", "DEV-2", "DEV-3"]));
-    expect(events.filter((event) => event.type === "issue.updated" && event.status?.stage === "queued").map((event) => event.status?.issueId)).toEqual(["issue-4", "issue-5"]);
+    expect(started).toEqual(["DEV-1"]);
+    expect(events.filter((event) => event.type === "issue.updated" && event.status?.stage === "queued").map((event) => event.status?.issueId)).toEqual(["issue-2", "issue-3", "issue-4", "issue-5"]);
 
-    resolvers.shift()?.();
-    await waitFor(() => started.length === 4);
-    resolvers.shift()?.();
-    await waitFor(() => started.length === 5);
+    while (started.length < issues.length) {
+      const expectedStarted = started.length + 1;
+      resolvers.shift()?.();
+      await waitFor(() => started.length === expectedStarted);
+    }
     for (const resolve of resolvers.splice(0)) resolve();
     await run;
 
     expect(started).toHaveLength(5);
     expect(started).toEqual(expect.arrayContaining(["DEV-1", "DEV-2", "DEV-3", "DEV-4", "DEV-5"]));
-    expect(peakActiveRuns).toBe(3);
+    expect(peakActiveRuns).toBe(1);
     expect(transitions.filter((transition) => transition.endsWith(":Agent: In Progress"))).toHaveLength(5);
+  }, 10_000);
+
+  it("honors an explicit parallel issue cap above the safe default", async () => {
+    const repoRoot = await initGitRepo();
+    const issues = Array.from({ length: 3 }, (_, index) => makeIssue(index + 1));
+    const linear = {
+      qualifyingIssues: async () => issues,
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    let activeRuns = 0;
+    let peakActiveRuns = 0;
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const openCode: OpenCodeRunner = {
+      runPhase: async (input) => {
+        activeRuns += 1;
+        peakActiveRuns = Math.max(peakActiveRuns, activeRuns);
+        started.push(input.issue.identifier);
+        return new Promise((resolve) => {
+          resolvers.push(() => {
+            activeRuns -= 1;
+            resolve({ text: "done" });
+          });
+        });
+      },
+      close: async () => {},
+    };
+
+    const events: Array<{ type: string; status?: { stage: string; issueId: string } }> = [];
+    const orchestrator = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode,
+      logger: { info() {}, warn() {}, error() {} },
+      once: true,
+      concurrency: 2,
+      onEvent: (event) => events.push(event),
+    });
+
+    const run = orchestrator.start();
+    await waitFor(() => started.length === 2);
+
+    expect(started).toEqual(expect.arrayContaining(["DEV-1", "DEV-2"]));
+    expect(events.filter((event) => event.type === "issue.updated" && event.status?.stage === "queued").map((event) => event.status?.issueId)).toEqual(["issue-3"]);
+
+    resolvers.shift()?.();
+    await waitFor(() => started.length === 3);
+    for (const resolve of resolvers.splice(0)) resolve();
+    await run;
+
+    expect(peakActiveRuns).toBe(2);
+  }, 10_000);
+
+  it("pauses additional parallel issue starts when free RAM is below the reserve", async () => {
+    const repoRoot = await initGitRepo();
+    const issues = Array.from({ length: 2 }, (_, index) => makeIssue(index + 1));
+    const linear = {
+      qualifyingIssues: async () => issues,
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    let freeMemory = 1 * 1024 * 1024 * 1024;
+    const openCode: OpenCodeRunner = {
+      runPhase: async (input) => {
+        started.push(input.issue.identifier);
+        return new Promise((resolve) => {
+          resolvers.push(() => resolve({ text: "done" }));
+        });
+      },
+      close: async () => {},
+    };
+
+    const run = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode,
+      logger: { info() {}, warn(message, meta) { warnings.push({ message, meta }); }, error() {} },
+      once: true,
+      concurrency: 2,
+      minFreeMemoryBytes: 2 * 1024 * 1024 * 1024,
+      memorySnapshot: () => ({ free: freeMemory, total: 8 * 1024 * 1024 * 1024 }),
+    }).start();
+
+    await waitFor(() => started.length === 1 && warnings.some((warning) => warning.message === "Pausing queued issue starts until more RAM is available"));
+    expect(started).toEqual(["DEV-1"]);
+
+    freeMemory = 3 * 1024 * 1024 * 1024;
+    await waitFor(() => started.length === 2);
+    for (const resolve of resolvers.splice(0)) resolve();
+    await run;
+  }, 10_000);
+
+  it("runs two issue agents end to end in parallel when resources allow it", async () => {
+    const repoRoot = await initGitRepo();
+    const issues = Array.from({ length: 2 }, (_, index) => makeIssue(index + 1));
+    const transitions: string[] = [];
+    const comments: string[] = [];
+    const linear = {
+      qualifyingIssues: async () => issues,
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async (issue: LinearIssue, statusName: string) => {
+        transitions.push(`${issue.identifier}:${statusName}`);
+      },
+      commentIssue: async (issueId: string, body: string) => {
+        comments.push(`${issueId}:${body}`);
+      },
+    } as unknown as LinearClient;
+
+    let activeRuns = 0;
+    let peakActiveRuns = 0;
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const openCode: OpenCodeRunner = {
+      runPhase: async (input) => {
+        activeRuns += 1;
+        peakActiveRuns = Math.max(peakActiveRuns, activeRuns);
+        started.push(`${input.issue.identifier}:${input.phase.id}`);
+        return new Promise((resolve) => {
+          resolvers.push(() => {
+            activeRuns -= 1;
+            resolve({ text: `completed ${input.issue.identifier}` });
+          });
+        });
+      },
+      close: async () => {},
+    };
+
+    const completed: string[] = [];
+    const run = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode,
+      logger: { info() {}, warn() {}, error() {} },
+      once: true,
+      concurrency: 2,
+      minFreeMemoryBytes: 0,
+      currentPrUrl: async (worktreePath) => `https://github.com/acme/repo/pull/${path.basename(worktreePath)}`,
+      onEvent: (event) => {
+        if (event.type === "issue.completed") completed.push(`${event.identifier}:${event.stage}`);
+      },
+    }).start();
+
+    await waitFor(() => started.length === 2);
+    expect(started).toEqual(expect.arrayContaining(["DEV-1:implement", "DEV-2:implement"]));
+    expect(peakActiveRuns).toBe(2);
+
+    for (const resolve of resolvers.splice(0)) resolve();
+    await run;
+
+    expect(transitions).toEqual(expect.arrayContaining(["DEV-1:Agent: In Progress", "DEV-2:Agent: In Progress", "DEV-1:Agent: In Review", "DEV-2:Agent: In Review"]));
+    expect(comments).toEqual(expect.arrayContaining([expect.stringContaining("issue-1:Twinpod opened a green PR:"), expect.stringContaining("issue-2:Twinpod opened a green PR:")]));
+    expect(completed).toEqual(expect.arrayContaining(["DEV-1:review", "DEV-2:review"]));
   }, 10_000);
 
   it("stops an in-flight issue once it's unassigned or moved to backlog, without touching Linear again", async () => {
