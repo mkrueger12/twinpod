@@ -9,8 +9,10 @@ import { errorOutput } from "./process.js";
 import { ensureIssueWorktree, materializeStageLibrary } from "./worktree.js";
 import type { LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary, Workflow, WorkflowPhase } from "./types.js";
 
+type ActiveIssue = { identifier: string; controller: AbortController };
+
 export class Orchestrator {
-  private readonly activeIssueIds = new Set<string>();
+  private readonly activeIssues = new Map<string, ActiveIssue>();
 
   constructor(
     private readonly options: {
@@ -45,16 +47,35 @@ export class Orchestrator {
           statuses: unique([...source.statuses, repo.twinpod.intake.claim.in_progress]),
         });
         for (const issue of issues) {
-          if (this.activeIssueIds.has(issue.id)) continue;
-          this.activeIssueIds.add(issue.id);
-          void this.processIssue(repo, issue).finally(() => this.activeIssueIds.delete(issue.id));
+          if (this.activeIssues.has(issue.id)) continue;
+          const controller = new AbortController();
+          this.options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+          this.activeIssues.set(issue.id, { identifier: issue.identifier, controller });
+          void this.processIssue(repo, issue, controller.signal).finally(() => this.activeIssues.delete(issue.id));
         }
       }
     }
-    while (this.activeIssueIds.size > 0 && this.options.once) await sleep(250, this.options.signal);
+    await this.stopIssuesThatNoLongerQualify();
+    while (this.activeIssues.size > 0 && this.options.once) await sleep(250, this.options.signal);
   }
 
-  private async processIssue(repo: RepoRuntimeConfig, issue: LinearIssue): Promise<void> {
+  private async stopIssuesThatNoLongerQualify(): Promise<void> {
+    for (const [issueId, active] of this.activeIssues) {
+      if (active.controller.signal.aborted) continue;
+      const status = await this.options.linear.getIssueStatus(issueId).catch(() => null);
+      if (!status) continue;
+      if (!status.assigneeId || status.stateType === "backlog") {
+        this.options.logger.info("Issue no longer assigned or moved to backlog; stopping work", {
+          issue: active.identifier,
+          assigned: Boolean(status.assigneeId),
+          state: status.stateName,
+        });
+        active.controller.abort();
+      }
+    }
+  }
+
+  private async processIssue(repo: RepoRuntimeConfig, issue: LinearIssue, signal: AbortSignal): Promise<void> {
     this.options.logger.info("Claiming Linear issue", { issue: issue.identifier, repo: repo.repoRoot });
     this.emitIssue(repo, issue, { stage: "claiming" });
     try {
@@ -63,10 +84,10 @@ export class Orchestrator {
       await materializeStageLibrary(worktree.path, this.options.stageLibrary);
       await writeFile(path.join(worktree.runDir, "issue.md"), issueMarkdown(issue), "utf8");
 
-      await this.runWorkflow(repo, issue, repo.workflow, worktree.path, worktree.runDir);
+      await this.runWorkflow(repo, issue, repo.workflow, worktree.path, worktree.runDir, signal);
     } catch (error) {
-      if (this.options.signal?.aborted) {
-        this.options.logger.info("Issue run interrupted by shutdown; leaving Linear status untouched so it resumes next run", { issue: issue.identifier });
+      if (signal.aborted) {
+        this.options.logger.info("Issue run stopped (shutdown, unassigned, or moved to backlog); leaving Linear status untouched so it resumes if still eligible next run", { issue: issue.identifier });
         this.emitIssue(repo, issue, { stage: "interrupted" });
         return;
       }
@@ -78,9 +99,9 @@ export class Orchestrator {
     }
   }
 
-  private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string): Promise<void> {
+  private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string, signal: AbortSignal): Promise<void> {
     for (const phase of workflow.phases) {
-      if (this.options.signal?.aborted) throw new Error("Shutdown requested before workflow completed");
+      if (signal.aborted) throw new Error("Stopped before workflow completed");
       await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir);
     }
     const prUrl = await currentPrUrl(worktreePath);

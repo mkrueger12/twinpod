@@ -73,6 +73,32 @@ describe("LinearClient", () => {
 
     expect(mutations[0]).toMatchObject({ variables: { id: "issue-id", input: { stateId: "state-review" } } });
   });
+
+  it("reports assignee and state type for an issue", async () => {
+    const client = new LinearClient(
+      { apiKey: "lin_api_key" },
+      async () => jsonResponse({ data: { issue: { assignee: { id: "user-1" }, state: { name: "In Progress", type: "started" } } } }),
+    );
+
+    await expect(client.getIssueStatus("issue-id")).resolves.toEqual({
+      assigneeId: "user-1",
+      stateName: "In Progress",
+      stateType: "started",
+    });
+  });
+
+  it("reports null assignee when unassigned", async () => {
+    const client = new LinearClient(
+      { apiKey: "lin_api_key" },
+      async () => jsonResponse({ data: { issue: { assignee: null, state: { name: "Backlog", type: "backlog" } } } }),
+    );
+
+    await expect(client.getIssueStatus("issue-id")).resolves.toEqual({
+      assigneeId: null,
+      stateName: "Backlog",
+      stateType: "backlog",
+    });
+  });
 });
 
 function jsonResponse(body: unknown): Response {

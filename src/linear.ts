@@ -40,6 +40,17 @@ export class LinearClient {
     return data.issues.nodes;
   }
 
+  async getIssueStatus(id: string): Promise<{ assigneeId: string | null; stateName: string; stateType: string } | null> {
+    const data = await this.graphql<{ issue: { assignee: { id: string } | null; state: { name: string; type: string } } | null }>(
+      `query TwinpodIssueStatus($id: String!) {
+        issue(id: $id) { assignee { id } state { name type } }
+      }`,
+      { id },
+    );
+    if (!data.issue) return null;
+    return { assigneeId: data.issue.assignee?.id ?? null, stateName: data.issue.state.name, stateType: data.issue.state.type };
+  }
+
   async transitionIssue(issue: LinearIssue, statusName: string): Promise<void> {
     const state = issue.team.states?.nodes.find((candidate) => candidate.name === statusName) ?? (await this.findTeamState(issue.team.id, statusName));
     if (!state) throw new Error(`Linear state ${statusName} not found for issue ${issue.identifier}`);
