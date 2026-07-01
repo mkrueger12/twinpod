@@ -65,6 +65,11 @@ export class Orchestrator {
 
       await this.runWorkflow(repo, issue, repo.workflow, worktree.path, worktree.runDir);
     } catch (error) {
+      if (this.options.signal?.aborted) {
+        this.options.logger.info("Issue run interrupted by shutdown; leaving Linear status untouched so it resumes next run", { issue: issue.identifier });
+        this.emitIssue(repo, issue, { stage: "interrupted" });
+        return;
+      }
       this.emitIssue(repo, issue, { stage: "failed" });
       this.options.logger.error("Issue run failed", { issue: issue.identifier, error: errorOutput(error) });
       await this.fail(repo, issue, `Twinpod stopped on an error:\n\n\`\`\`\n${errorOutput(error).slice(-10_000)}\n\`\`\``).catch((failure) => {
@@ -75,6 +80,7 @@ export class Orchestrator {
 
   private async runWorkflow(repo: RepoRuntimeConfig, issue: LinearIssue, workflow: Workflow, worktreePath: string, runDir: string): Promise<void> {
     for (const phase of workflow.phases) {
+      if (this.options.signal?.aborted) throw new Error("Shutdown requested before workflow completed");
       await this.runPhaseWithGate(repo, issue, phase, worktreePath, runDir);
     }
     const prUrl = await currentPrUrl(worktreePath);

@@ -4,17 +4,18 @@ import type { LinearClient } from "./linear.js";
 import type { Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary } from "./types.js";
 
 type OpenTuiCore = {
-  createCliRenderer(options?: Record<string, unknown>): Promise<unknown>;
-  Box(props?: Record<string, unknown>, ...children: unknown[]): unknown;
-  Text(props?: Record<string, unknown>): unknown;
+  createCliRenderer(options?: Record<string, unknown>): Promise<TuiRenderer>;
+  BoxRenderable: new (ctx: unknown, props?: Record<string, unknown>) => TuiRenderable;
+  TextRenderable: new (ctx: unknown, props?: Record<string, unknown>) => TuiRenderable;
 };
 
 type TuiRenderable = {
   content?: string;
+  add(node: TuiRenderable): number;
 };
 
 type TuiRenderer = {
-  root: { add(node: unknown): void };
+  root: TuiRenderable;
   requestLive?: () => void;
   dropLive?: () => void;
   requestRender?: () => void;
@@ -64,26 +65,35 @@ export async function runTui(options: {
     onDestroy: () => options.abort?.(new Error("TUI closed")),
   })) as TuiRenderer;
 
-  const header = core.Text({ content: "" }) as TuiRenderable;
-  const issues = core.Text({ content: "" }) as TuiRenderable;
-  const logs = core.Text({ content: "" }) as TuiRenderable;
-  const footer = core.Text({ content: "" }) as TuiRenderable;
+  // `createCliRenderer` doubles as the render context that Renderable subclasses expect as their
+  // first constructor argument (see @opentui/core's `this.root = new RootRenderable(this)`).
+  // The Box()/Text() JSX-style factories only build inert VNode descriptors that get discarded
+  // once mounted; mutating their `.content` afterward never touches the live tree. Constructing
+  // the real Renderable instances directly keeps stable references we can mutate every redraw.
+  const header = new core.TextRenderable(renderer, { content: "" });
+  const issues = new core.TextRenderable(renderer, { content: "" });
+  const logs = new core.TextRenderable(renderer, { content: "" });
+  const footer = new core.TextRenderable(renderer, { content: "" });
 
-  renderer.root.add(
-    core.Box(
-      {
-        width: "100%",
-        height: "100%",
-        flexDirection: "column",
-        padding: 1,
-        gap: 1,
-      },
-      core.Box({ borderStyle: "rounded", padding: 1, title: "Twinpod" }, header),
-      core.Box({ borderStyle: "rounded", padding: 1, flexGrow: 1, title: "Current Work" }, issues),
-      core.Box({ borderStyle: "rounded", padding: 1, height: 10, title: "Live Log" }, logs),
-      footer,
-    ),
-  );
+  const headerBox = new core.BoxRenderable(renderer, { borderStyle: "rounded", padding: 1, title: "Twinpod" });
+  headerBox.add(header);
+  const issuesBox = new core.BoxRenderable(renderer, { borderStyle: "rounded", padding: 1, flexGrow: 1, title: "Current Work" });
+  issuesBox.add(issues);
+  const logsBox = new core.BoxRenderable(renderer, { borderStyle: "rounded", padding: 1, height: 10, title: "Live Log" });
+  logsBox.add(logs);
+
+  const root = new core.BoxRenderable(renderer, {
+    width: "100%",
+    height: "100%",
+    flexDirection: "column",
+    padding: 1,
+    gap: 1,
+  });
+  root.add(headerBox);
+  root.add(issuesBox);
+  root.add(logsBox);
+  root.add(footer);
+  renderer.root.add(root);
 
   renderer.requestLive?.();
   const redraw = () => {
@@ -160,17 +170,7 @@ function renderHeader(state: TuiState): string {
 
 function renderIssues(state: TuiState): string {
   if (state.active.size === 0) return `Waiting for qualifying Linear issues ${ticker(state.ticker)}`;
-  return [...state.active.values()].map((status) => renderIssue(status, state.ticker)).join("\n\n");
-}
-
-function renderIssue(status: RuntimeIssueStatus, tick: number): string {
-  const parts = [`${status.identifier}: ${status.title}`, `stage: ${status.stage} ${ticker(tick)}`];
-  if (status.phase) parts.push(`phase: ${status.phase}${status.cycle ? ` (${status.cycle}/${status.maxCycles ?? status.cycle})` : ""}`);
-  parts.push(`repo: ${basename(status.repoRoot)}`);
-  parts.push(`updated: ${relativeTime(status.updatedAt)}`);
-  parts.push(`cost: ${typeof status.costUsd === "number" ? `$${status.costUsd.toFixed(4)}` : "pending"}`);
-  if (status.url) parts.push(`linear: ${status.url}`);
-  return parts.join("\n");
+  return [...state.active.values()].map((status) => `${status.identifier} ${ticker(state.ticker)}`).join("\n");
 }
 
 function appendLog(state: TuiState, level: string, message: string): void {
