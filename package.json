@@ -13,7 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@opencode-ai/sdk": "^0.6.4",
+    "@opencode-ai/sdk": "^1.17.12",
     "@opentui/core": "^0.4.2",
     "undici": "^7.28.0",
     "yaml": "^2.8.0"
