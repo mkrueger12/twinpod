@@ -1,0 +1,28 @@
+{
+  "name": "twinpod",
+  "version": "0.1.0",
+  "description": "OpenCode-backed issue orchestration daemon",
+  "type": "module",
+  "bin": {
+    "twinpod": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "liquidjs": "^10.21.1",
+    "yaml": "^2.8.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.10",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
