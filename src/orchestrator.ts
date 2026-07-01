@@ -91,7 +91,7 @@ export class Orchestrator {
     } catch (error) {
       if (signal.aborted) {
         this.options.logger.info("Issue run stopped (shutdown, unassigned, or moved to backlog); leaving Linear status untouched so it resumes if still eligible next run", { issue: issue.identifier });
-        this.emitIssue(repo, issue, { stage: "interrupted" });
+        this.emit({ type: "issue.completed", issueId: issue.id, identifier: issue.identifier, stage: "interrupted", at: new Date().toISOString() });
         return;
       }
       this.emitIssue(repo, issue, { stage: "failed" });

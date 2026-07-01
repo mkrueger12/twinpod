@@ -66,6 +66,7 @@ describe("Orchestrator", () => {
       workflow: { phases: [{ id: "implement", prompt: "implement" }] },
     };
 
+    const events: Array<{ type: string }> = [];
     const orchestrator = new Orchestrator({
       repos: [repo],
       stageLibrary,
@@ -73,6 +74,7 @@ describe("Orchestrator", () => {
       openCode,
       logger: { info() {}, warn() {}, error() {} },
       once: true,
+      onEvent: (event) => events.push(event),
     });
 
     await orchestrator.start();
@@ -83,6 +85,9 @@ describe("Orchestrator", () => {
     // once the issue was found unassigned/backlog, and no error was surfaced as a run failure.
     expect(transitions).toEqual(["Agent: In Progress"]);
     expect(comments).toEqual([]);
+    // The TUI's "Current Work" panel only drops an issue on `issue.completed` — the stopped
+    // run must emit one (not just an `issue.updated`) or it stays listed as active forever.
+    expect(events).toContainEqual(expect.objectContaining({ type: "issue.completed", issueId: "issue-1", stage: "interrupted" }));
   }, 10_000);
 });
 
