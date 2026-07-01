@@ -3,6 +3,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import YAML from "yaml";
+import { parseDurationMs } from "./duration.js";
 import type { PromptDefinition, RepoRuntimeConfig, StageLibrary, TwinpodConfig, Workflow, WorkflowPhase } from "./types.js";
 
 export function findTwinpodRoot(): string {
@@ -68,10 +69,17 @@ function parseTwinpodConfig(value: unknown, repoRoot: string, configPath: string
   });
 
   const claimRecord = requireRecord(intake.claim, `${configPath}: intake.claim`);
+  const pollInterval = optionalString(intake.poll_interval) ?? "30s";
+  try {
+    parseDurationMs(pollInterval);
+  } catch (error) {
+    throw new Error(`${configPath}: intake.poll_interval is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const twinpod: TwinpodConfig = {
     repoRoot,
+    max_parallel_agents: optionalPositiveInteger(record.max_parallel_agents, `${configPath}: max_parallel_agents`),
     intake: {
-      poll_interval: optionalString(intake.poll_interval) ?? "30s",
+      poll_interval: pollInterval,
       sources,
       claim: {
         in_progress: requireString(claimRecord.in_progress, `${configPath}: intake.claim.in_progress`),
@@ -214,4 +222,10 @@ function optionalStringArray(value: unknown): string[] | undefined {
 
 function optionalNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalPositiveInteger(value: unknown, context: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) throw new Error(`${context} must be a positive integer`);
+  return value;
 }

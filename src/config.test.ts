@@ -45,6 +45,32 @@ describe("loadRepoConfig", () => {
     expect(config.twinpod.intake.sources[0]?.project_slug).toBe("agent-v2-e6613e94140b");
   });
 
+  it("loads an optional max parallel agent cap", async () => {
+    const twinpodRoot = await fixtureStageLibrary();
+    const stageLibrary = await loadStageLibrary(twinpodRoot);
+    const repo = await fixtureRepo({ maxParallelAgents: 3 });
+
+    const config = await loadRepoConfig(repo, stageLibrary);
+
+    expect(config.twinpod.max_parallel_agents).toBe(3);
+  });
+
+  it("hard-fails when max_parallel_agents is not a positive integer", async () => {
+    const twinpodRoot = await fixtureStageLibrary();
+    const stageLibrary = await loadStageLibrary(twinpodRoot);
+    const repo = await fixtureRepo({ maxParallelAgents: 0 });
+
+    await expect(loadRepoConfig(repo, stageLibrary)).rejects.toThrow(/max_parallel_agents must be a positive integer/);
+  });
+
+  it("hard-fails when poll_interval is invalid", async () => {
+    const twinpodRoot = await fixtureStageLibrary();
+    const stageLibrary = await loadStageLibrary(twinpodRoot);
+    const repo = await fixtureRepo({ pollInterval: "eventually" });
+
+    await expect(loadRepoConfig(repo, stageLibrary)).rejects.toThrow(/intake\.poll_interval is invalid/);
+  });
+
   it("hard-fails when a workflow references a prompt the stage library doesn't define", async () => {
     const twinpodRoot = await fixtureStageLibrary();
     const stageLibrary = await loadStageLibrary(twinpodRoot);
@@ -67,12 +93,12 @@ async function fixtureStageLibrary(options: { promptAgent?: string } = {}): Prom
   return twinpodRoot;
 }
 
-async function fixtureRepo(options: { promptName?: string; projectKey?: string; projectValue?: string } = {}): Promise<string> {
+async function fixtureRepo(options: { promptName?: string; projectKey?: string; projectValue?: string; maxParallelAgents?: number; pollInterval?: string } = {}): Promise<string> {
   const repo = await mkdtemp(path.join(os.tmpdir(), "twinpod-config-"));
   await writeFile(
     path.join(repo, "twinpod.yaml"),
-    `intake:
-  poll_interval: 30s
+    `${options.maxParallelAgents === undefined ? "" : `max_parallel_agents: ${options.maxParallelAgents}\n`}intake:
+  poll_interval: ${options.pollInterval ?? "30s"}
   sources:
     - ${options.projectKey ?? "project"}: ${options.projectValue ?? "Twinpod Backlog"}
       statuses: [Ready for Agent]

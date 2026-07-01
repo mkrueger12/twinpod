@@ -8,6 +8,236 @@ import type { LinearClient } from "./linear.js";
 import type { LinearIssue, OpenCodeRunner, RepoRuntimeConfig, StageLibrary } from "./types.js";
 
 describe("Orchestrator", () => {
+  it("keeps polling in live mode after a transient Linear intake failure", async () => {
+    const repoRoot = await initGitRepo();
+    const controller = new AbortController();
+    let calls = 0;
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const linear = {
+      qualifyingIssues: async () => {
+        calls += 1;
+        if (calls === 1) throw new Error("Linear GraphQL HTTP 503: upstream connect error");
+        controller.abort();
+        return [];
+      },
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    await new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode: { runPhase: async () => ({ text: "done" }), close: async () => {} },
+      logger: { info() {}, warn(message, meta) { warnings.push({ message, meta }); }, error() {} },
+      signal: controller.signal,
+    }).start();
+
+    expect(calls).toBe(2);
+    expect(warnings).toEqual([
+      expect.objectContaining({
+        message: "Linear poll failed; will retry on the next interval",
+        meta: expect.objectContaining({ error: expect.stringContaining("Linear GraphQL HTTP 503") }),
+      }),
+    ]);
+  });
+
+  it("stops cleanly when shutdown happens between live polls", async () => {
+    const repoRoot = await initGitRepo();
+    const controller = new AbortController();
+    const linear = {
+      qualifyingIssues: async () => [],
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    const run = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode: { runPhase: async () => ({ text: "done" }), close: async () => {} },
+      logger: { info() {}, warn() {}, error() {} },
+      signal: controller.signal,
+    }).start();
+
+    await waitFor(() => !controller.signal.aborted);
+    controller.abort(new Error("shutdown"));
+
+    await expect(run).resolves.toBeUndefined();
+  });
+
+  it("continues when a runtime event handler throws", async () => {
+    const repoRoot = await initGitRepo();
+    const controller = new AbortController();
+    const warnings: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const linear = {
+      qualifyingIssues: async () => {
+        controller.abort();
+        return [];
+      },
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    await new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode: { runPhase: async () => ({ text: "done" }), close: async () => {} },
+      logger: { info() {}, warn(message, meta) { warnings.push({ message, meta }); }, error() {} },
+      signal: controller.signal,
+      onEvent: () => {
+        throw new Error("renderer failed");
+      },
+    }).start();
+
+    expect(warnings).toContainEqual(
+      expect.objectContaining({
+        message: "Runtime event handler failed; continuing",
+        meta: expect.objectContaining({ event: "server.started", error: expect.stringContaining("renderer failed") }),
+      }),
+    );
+  });
+
+  it("continues when the runtime event failure logger also throws", async () => {
+    const repoRoot = await initGitRepo();
+    const controller = new AbortController();
+    const linear = {
+      qualifyingIssues: async () => {
+        controller.abort();
+        return [];
+      },
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    await expect(
+      new Orchestrator({
+        repos: [repoConfig(repoRoot)],
+        stageLibrary: stageLibrary(repoRoot),
+        linear,
+        openCode: { runPhase: async () => ({ text: "done" }), close: async () => {} },
+        logger: { info() {}, warn() { throw new Error("logger failed"); }, error() {} },
+        signal: controller.signal,
+        onEvent: () => {
+          throw new Error("renderer failed");
+        },
+      }).start(),
+    ).resolves.toBeUndefined();
+  });
+
+  it("prioritizes in-progress issues before todo work", async () => {
+    const repoRoot = await initGitRepo();
+    const issues = [makeIssue(1), makeIssue(2), makeIssue(3, "Agent: In Progress")];
+    const linear = {
+      qualifyingIssues: async () => issues,
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async () => {},
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const openCode: OpenCodeRunner = {
+      runPhase: async (input) => {
+        started.push(input.issue.identifier);
+        return new Promise((resolve) => {
+          resolvers.push(() => resolve({ text: "done" }));
+        });
+      },
+      close: async () => {},
+    };
+
+    const orchestrator = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode,
+      logger: { info() {}, warn() {}, error() {} },
+      once: true,
+      concurrency: 1,
+    });
+
+    const run = orchestrator.start();
+    await waitFor(() => started.length === 1);
+    expect(started[0]).toBe("DEV-3");
+
+    while (started.length < issues.length) {
+      const expectedStarted = started.length + 1;
+      resolvers.shift()?.();
+      await waitFor(() => started.length === expectedStarted);
+    }
+    for (const resolve of resolvers.splice(0)) resolve();
+    await run;
+  }, 10_000);
+
+  it("defaults to three parallel issue runs and starts queued issues as slots free", async () => {
+    const repoRoot = await initGitRepo();
+    const issues = Array.from({ length: 5 }, (_, index) => makeIssue(index + 1));
+    const transitions: string[] = [];
+    const linear = {
+      qualifyingIssues: async () => issues,
+      getIssueStatus: async () => ({ assigneeId: "user-1", stateName: "Agent: In Progress", stateType: "started" }),
+      transitionIssue: async (issue: LinearIssue, statusName: string) => {
+        transitions.push(`${issue.identifier}:${statusName}`);
+      },
+      commentIssue: async () => {},
+    } as unknown as LinearClient;
+
+    let activeRuns = 0;
+    let peakActiveRuns = 0;
+    const started: string[] = [];
+    const resolvers: Array<() => void> = [];
+    const openCode: OpenCodeRunner = {
+      runPhase: async (input) => {
+        activeRuns += 1;
+        peakActiveRuns = Math.max(peakActiveRuns, activeRuns);
+        started.push(input.issue.identifier);
+        return new Promise((resolve) => {
+          resolvers.push(() => {
+            activeRuns -= 1;
+            resolve({ text: "done" });
+          });
+        });
+      },
+      close: async () => {},
+    };
+
+    const events: Array<{ type: string; status?: { stage: string; issueId: string } }> = [];
+    const orchestrator = new Orchestrator({
+      repos: [repoConfig(repoRoot)],
+      stageLibrary: stageLibrary(repoRoot),
+      linear,
+      openCode,
+      logger: { info() {}, warn() {}, error() {} },
+      once: true,
+      onEvent: (event) => events.push(event),
+    });
+
+    const run = orchestrator.start();
+    await waitFor(() => started.length === 3);
+
+    expect(started).toHaveLength(3);
+    expect(started).toEqual(expect.arrayContaining(["DEV-1", "DEV-2", "DEV-3"]));
+    expect(events.filter((event) => event.type === "issue.updated" && event.status?.stage === "queued").map((event) => event.status?.issueId)).toEqual(["issue-4", "issue-5"]);
+
+    resolvers.shift()?.();
+    await waitFor(() => started.length === 4);
+    resolvers.shift()?.();
+    await waitFor(() => started.length === 5);
+    for (const resolve of resolvers.splice(0)) resolve();
+    await run;
+
+    expect(started).toHaveLength(5);
+    expect(started).toEqual(expect.arrayContaining(["DEV-1", "DEV-2", "DEV-3", "DEV-4", "DEV-5"]));
+    expect(peakActiveRuns).toBe(3);
+    expect(transitions.filter((transition) => transition.endsWith(":Agent: In Progress"))).toHaveLength(5);
+  }, 10_000);
+
   it("stops an in-flight issue once it's unassigned or moved to backlog, without touching Linear again", async () => {
     const repoRoot = await initGitRepo();
     const issue: LinearIssue = {
@@ -90,6 +320,48 @@ describe("Orchestrator", () => {
     expect(events).toContainEqual(expect.objectContaining({ type: "issue.completed", issueId: "issue-1", stage: "interrupted" }));
   }, 10_000);
 });
+
+function makeIssue(index: number, stateName = "Ready for Agent"): LinearIssue {
+  return {
+    id: `issue-${index}`,
+    identifier: `DEV-${index}`,
+    title: `Do the thing ${index}`,
+    state: { name: stateName },
+    team: { id: "team-1", states: { nodes: [{ id: "state-in-progress", name: "Agent: In Progress" }, { id: "state-failed", name: "Agent: Needs Attention" }] } },
+  };
+}
+
+function repoConfig(repoRoot: string): RepoRuntimeConfig {
+  return {
+    repoRoot,
+    twinpod: {
+      repoRoot,
+      intake: {
+        poll_interval: "50ms",
+        sources: [{ statuses: ["Ready for Agent"] }],
+        claim: { in_progress: "Agent: In Progress", review: "Agent: In Review", failed: "Agent: Needs Attention" },
+      },
+    },
+    workflow: { phases: [{ id: "implement", prompt: "implement" }] },
+  };
+}
+
+function stageLibrary(repoRoot: string): StageLibrary {
+  return {
+    root: repoRoot,
+    prompts: new Map([["implement", { name: "implement", agent: "impl-agent", template: "Implement {{issue_id}}." }]]),
+    agents: new Set(["impl-agent"]),
+    agentFiles: new Map(),
+  };
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const startedAt = Date.now();
+  while (!condition()) {
+    if (Date.now() - startedAt > 5_000) throw new Error("Timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
 
 async function initGitRepo(): Promise<string> {
   const repoRoot = await mkdtemp(path.join(os.tmpdir(), "twinpod-orch-"));

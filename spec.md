@@ -41,6 +41,7 @@ Determines **which issues enter the system at all** — a pure Linear query, no 
 
 ```yaml
 # twinpod.yaml  (at the root of each managed repo)
+max_parallel_agents: 3                     # optional; defaults to 3, CLI --max-agents overrides
 intake:
   poll_interval: 30s
   sources:
@@ -62,6 +63,7 @@ Rules:
 - The **target repo is implicit** — it's the repo whose `twinpod.yaml` declared the source. The orchestrator process polls each managed repo's `twinpod.yaml` and works that repo's qualifying issues.
 - On pickup, twinpod transitions the issue to the `in_progress` status. **That status move is the claim** — it prevents re-selection and shows humans the issue is being worked. Status is the lifecycle signal end to end (`in_progress` → `review` → done, or → `failed`).
 - Multiple `sources` are supported (several projects / statuses for the same repo).
+- `max_parallel_agents` caps concurrently running issue agents. Qualifying issues beyond the cap remain queued in the orchestrator and are not claimed in Linear until a slot opens.
 
 ---
 

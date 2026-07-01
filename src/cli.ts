@@ -4,6 +4,7 @@ import { consoleLogger } from "./logger.js";
 import { Orchestrator } from "./orchestrator.js";
 import { LinearClient } from "./linear.js";
 import { SdkOpenCodeRunner } from "./opencode.js";
+import { errorOutput } from "./process.js";
 import { runTui } from "./tui.js";
 import { cleanupMergedWorktrees } from "./worktree.js";
 import type { RepoRuntimeConfig } from "./types.js";
@@ -16,6 +17,7 @@ type CliOptions = {
   linearEndpoint?: string;
   opencodeUrl?: string;
   opencodePort?: number;
+  maxAgents?: number;
 };
 
 async function main() {
@@ -58,7 +60,7 @@ async function main() {
   try {
     const linear = new LinearClient({ apiKey: linearApiKey, endpoint: linearEndpoint, pageSize });
     if (options.command === "tui") {
-      await runTui({ repos, stageLibrary, linear, openCode, once: options.once, signal: controller.signal, abort: (reason) => controller.abort(reason) });
+      await runTui({ repos, stageLibrary, linear, openCode, once: options.once, concurrency: resolveMaxAgents(options, repos), signal: controller.signal, abort: (reason) => controller.abort(reason) });
     } else {
       await new Orchestrator({
         repos,
@@ -67,11 +69,14 @@ async function main() {
         openCode,
         logger: consoleLogger,
         once: options.once,
+        concurrency: resolveMaxAgents(options, repos),
         signal: controller.signal,
       }).start();
     }
   } finally {
-    await openCode.close();
+    await openCode.close().catch((error) => {
+      consoleLogger.warn("Failed to close OpenCode server", { error: errorOutput(error) });
+    });
   }
 }
 
@@ -94,10 +99,18 @@ function parseArgs(args: string[]): CliOptions {
     else if (arg.startsWith("--opencode-url=")) options.opencodeUrl = arg.slice("--opencode-url=".length);
     else if (arg === "--opencode-port") options.opencodePort = Number(requireValue(args, ++index, arg));
     else if (arg.startsWith("--opencode-port=")) options.opencodePort = Number(arg.slice("--opencode-port=".length));
+    else if (arg === "--max-agents") options.maxAgents = parsePositiveInteger(requireValue(args, ++index, arg), arg);
+    else if (arg.startsWith("--max-agents=")) options.maxAgents = parsePositiveInteger(arg.slice("--max-agents=".length), "--max-agents");
     else if (arg === "--help" || arg === "-h") options.command = "help";
     else throw new Error(`Unknown argument: ${arg}`);
   }
   return options;
+}
+
+function resolveMaxAgents(options: CliOptions, repos: RepoRuntimeConfig[]): number | undefined {
+  if (options.maxAgents !== undefined) return options.maxAgents;
+  const configured = repos.flatMap((repo) => (repo.twinpod.max_parallel_agents === undefined ? [] : [repo.twinpod.max_parallel_agents]));
+  return configured.length > 0 ? Math.min(...configured) : undefined;
 }
 
 function resolveLinearApiKey(options: CliOptions, repos: RepoRuntimeConfig[]): string {
@@ -116,12 +129,18 @@ function requireValue(args: string[], index: number, flag: string): string {
   return value;
 }
 
+function parsePositiveInteger(value: string, flag: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < 1) throw new Error(`${flag} must be a positive integer`);
+  return parsed;
+}
+
 function printHelp() {
   console.log(`Twinpod
 
 Usage:
-  twinpod serve [--repo PATH ...] [--once] [--linear-api-key KEY] [--opencode-url URL]
-  twinpod tui [--repo PATH ...] [--once] [--linear-api-key KEY] [--opencode-url URL]
+  twinpod serve [--repo PATH ...] [--once] [--max-agents N] [--linear-api-key KEY] [--opencode-url URL]
+  twinpod tui [--repo PATH ...] [--once] [--max-agents N] [--linear-api-key KEY] [--opencode-url URL]
   twinpod validate [--repo PATH ...]
   twinpod cleanup [--repo PATH ...]
 

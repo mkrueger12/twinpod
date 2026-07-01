@@ -10,9 +10,15 @@ import { ensureIssueWorktree, materializeStageLibrary } from "./worktree.js";
 import type { LinearIssue, Logger, OpenCodeRunner, RepoRuntimeConfig, RuntimeEvent, RuntimeIssueStatus, StageLibrary, Workflow, WorkflowPhase } from "./types.js";
 
 type ActiveIssue = { identifier: string; controller: AbortController };
+type QueuedIssue = { repo: RepoRuntimeConfig; issue: LinearIssue; queuedAt: number };
+type PolledIssue = QueuedIssue & { order: number };
 
 export class Orchestrator {
   private readonly activeIssues = new Map<string, ActiveIssue>();
+  private readonly queuedIssues = new Map<string, QueuedIssue>();
+  private readonly announcedQueuedIssueIds = new Set<string>();
+  private lastQueuedOrderKey = "";
+  private queueSequence = 0;
 
   constructor(
     private readonly options: {
@@ -33,33 +39,99 @@ export class Orchestrator {
     this.emit({ type: "server.started", repos: this.options.repos.map((repo) => repo.repoRoot), once: this.options.once ?? false, at: new Date().toISOString() });
     do {
       await this.pollAllRepos();
-      if (this.options.once) break;
-      await sleep(this.pollIntervalMs(), this.options.signal);
+      if (this.options.once || this.options.signal?.aborted) break;
+      try {
+        await sleep(this.pollIntervalMs(), this.options.signal);
+      } catch (error) {
+        if (this.options.signal?.aborted) break;
+        throw error;
+      }
     } while (!this.options.signal?.aborted);
   }
 
   private async pollAllRepos(): Promise<void> {
+    const polledIssues = new Map<string, PolledIssue>();
+    let order = 0;
     for (const repo of this.options.repos) {
       this.emit({ type: "poll.started", repoRoot: repo.repoRoot, at: new Date().toISOString() });
       for (const source of repo.twinpod.intake.sources) {
-        const issues = await this.options.linear.qualifyingIssues({
-          ...source,
-          statuses: unique([...source.statuses, repo.twinpod.intake.claim.in_progress]),
-        });
+        let issues: LinearIssue[];
+        try {
+          issues = await this.options.linear.qualifyingIssues({
+            ...source,
+            statuses: unique([...source.statuses, repo.twinpod.intake.claim.in_progress]),
+          });
+        } catch (error) {
+          if (this.options.once) throw error;
+          this.options.logger.warn("Linear poll failed; will retry on the next interval", { repo: repo.repoRoot, error: errorOutput(error) });
+          continue;
+        }
         for (const issue of issues) {
-          if (this.activeIssues.has(issue.id)) continue;
-          const controller = new AbortController();
-          this.options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
-          this.activeIssues.set(issue.id, { identifier: issue.identifier, controller });
-          void this.processIssue(repo, issue, controller.signal).finally(() => this.activeIssues.delete(issue.id));
+          if (this.activeIssues.has(issue.id) || this.queuedIssues.has(issue.id) || polledIssues.has(issue.id)) continue;
+          polledIssues.set(issue.id, { repo, issue, queuedAt: order, order: order++ });
         }
       }
     }
+    for (const { repo, issue } of [...polledIssues.values()].sort(compareIssuePriority)) this.enqueueIssue(repo, issue);
+    this.reorderIssueQueue();
+    this.drainIssueQueue();
+    this.emitQueuedIssues();
     await this.stopIssuesThatNoLongerQualify();
-    while (this.activeIssues.size > 0 && this.options.once) {
-      await sleep(250, this.options.signal);
+    while ((this.activeIssues.size > 0 || this.queuedIssues.size > 0) && this.options.once && !this.options.signal?.aborted) {
+      try {
+        await sleep(250, this.options.signal);
+      } catch (error) {
+        if (this.options.signal?.aborted) break;
+        throw error;
+      }
       await this.stopIssuesThatNoLongerQualify();
+      this.drainIssueQueue();
+      this.emitQueuedIssues();
     }
+  }
+
+  private enqueueIssue(repo: RepoRuntimeConfig, issue: LinearIssue): void {
+    this.queuedIssues.set(issue.id, { repo, issue, queuedAt: this.queueSequence++ });
+  }
+
+  private reorderIssueQueue(): void {
+    const queued = [...this.queuedIssues.entries()].sort(([, left], [, right]) => compareQueuedIssuePriority(left, right));
+    this.queuedIssues.clear();
+    for (const [issueId, issue] of queued) this.queuedIssues.set(issueId, issue);
+  }
+
+  private drainIssueQueue(): void {
+    while (!this.options.signal?.aborted && this.activeIssues.size < this.maxParallelAgents() && this.queuedIssues.size > 0) {
+      const next = this.queuedIssues.entries().next().value;
+      if (!next) return;
+      const [issueId, queued] = next;
+      this.queuedIssues.delete(issueId);
+      this.announcedQueuedIssueIds.delete(issueId);
+      this.startIssue(queued.repo, queued.issue);
+    }
+  }
+
+  private emitQueuedIssues(): void {
+    const queuedOrderKey = [...this.queuedIssues.keys()].join("\0");
+    if (queuedOrderKey === this.lastQueuedOrderKey) return;
+    this.lastQueuedOrderKey = queuedOrderKey;
+    for (const [issueId, queued] of this.queuedIssues) {
+      if (!this.announcedQueuedIssueIds.has(issueId)) {
+        this.announcedQueuedIssueIds.add(issueId);
+        this.options.logger.info("Queueing Linear issue until an agent slot is available", { issue: queued.issue.identifier, repo: queued.repo.repoRoot, active: this.activeIssues.size, max: this.maxParallelAgents() });
+      }
+      this.emitIssue(queued.repo, queued.issue, { stage: "queued" });
+    }
+  }
+
+  private startIssue(repo: RepoRuntimeConfig, issue: LinearIssue): void {
+    const controller = new AbortController();
+    this.options.signal?.addEventListener("abort", () => controller.abort(), { once: true });
+    this.activeIssues.set(issue.id, { identifier: issue.identifier, controller });
+    void this.processIssue(repo, issue, controller.signal).finally(() => {
+      this.activeIssues.delete(issue.id);
+      this.drainIssueQueue();
+    });
   }
 
   private async stopIssuesThatNoLongerQualify(): Promise<void> {
@@ -173,8 +245,20 @@ export class Orchestrator {
     return Math.min(...this.options.repos.map((repo) => parseDurationMs(repo.twinpod.intake.poll_interval)));
   }
 
+  private maxParallelAgents(): number {
+    return Math.max(1, Math.floor(this.options.concurrency ?? 3));
+  }
+
   private emit(event: RuntimeEvent): void {
-    this.options.onEvent?.(event);
+    try {
+      this.options.onEvent?.(event);
+    } catch (error) {
+      try {
+        this.options.logger.warn("Runtime event handler failed; continuing", { event: event.type, error: errorOutput(error) });
+      } catch {
+        // Event handlers are observational; a broken dashboard must not stop the worker loop.
+      }
+    }
   }
 
   private emitIssue(repo: RepoRuntimeConfig, issue: LinearIssue, status: Partial<Omit<RuntimeIssueStatus, "issueId" | "identifier" | "title" | "url" | "repoRoot" | "updatedAt">> & { stage: string }): void {
@@ -195,6 +279,24 @@ export class Orchestrator {
 
 function unique<T>(items: T[]): T[] {
   return [...new Set(items)];
+}
+
+function compareIssuePriority(left: PolledIssue, right: PolledIssue): number {
+  const leftInProgress = isInProgress(left);
+  const rightInProgress = isInProgress(right);
+  if (leftInProgress !== rightInProgress) return leftInProgress ? -1 : 1;
+  return left.order - right.order;
+}
+
+function isInProgress(polled: QueuedIssue): boolean {
+  return polled.issue.state.name === polled.repo.twinpod.intake.claim.in_progress;
+}
+
+function compareQueuedIssuePriority(left: QueuedIssue, right: QueuedIssue): number {
+  const leftInProgress = isInProgress(left);
+  const rightInProgress = isInProgress(right);
+  if (leftInProgress !== rightInProgress) return leftInProgress ? -1 : 1;
+  return left.queuedAt - right.queuedAt;
 }
 
 async function writePhaseMarker(markerPath: string, phase: WorkflowPhase, cycle: number): Promise<void> {

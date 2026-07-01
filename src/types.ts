@@ -17,6 +17,7 @@ export type ClaimConfig = {
 
 export type TwinpodConfig = {
   repoRoot: string;
+  max_parallel_agents?: number;
   intake: {
     poll_interval: string;
     sources: IntakeSource[];

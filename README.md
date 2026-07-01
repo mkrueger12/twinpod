@@ -15,11 +15,14 @@ Useful commands:
 ```bash
 npm run dev -- validate --repo .
 npm run dev -- serve --repo . --once
+npm run dev -- serve --repo . --max-agents 3
 npm run dev -- tui --repo .
 npm run dev -- cleanup --repo .
 ```
 
 `twinpod.yaml` is repo-local. Edit its Linear project/status names to match the managed repo. You can provide the Linear key with `LINEAR_API_KEY`, `linear.api_key_env`, `linear.api_key`, or `--linear-api-key`.
+
+Twinpod runs up to 3 issue agents at a time by default. Set `max_parallel_agents` in `twinpod.yaml`, or pass `--max-agents`, to override the cap. Extra qualifying issues are queued locally and start when an active run completes.
 
 If `OPENCODE_SERVER_URL` is set, Twinpod attaches to that server. Otherwise it starts an OpenCode server through `@opencode-ai/sdk` when needed.
 
