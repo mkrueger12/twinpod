@@ -146,8 +146,7 @@ export class OpenCodeClient {
 
   async createSession(workspacePath: string, title: string): Promise<string> {
     const server = await this.manager.ensureHealthy();
-    const body = { cwd: workspacePath, path: workspacePath, workspace: workspacePath, title };
-    const response = await this.postAny(server.url, ["/session", "/sessions"], body, this.config.readTimeoutMs);
+    const response = await this.postAny(server.url, [`/session?directory=${encodeURIComponent(workspacePath)}`], { title }, this.config.readTimeoutMs);
     const id = extractString(response, ["id", "sessionId", "session_id", "session.id"]);
     if (!id) throw new TwinpodError("response_error", "OpenCode session response did not include a session ID");
     return id;
@@ -167,27 +166,24 @@ export class OpenCodeClient {
   }): Promise<OpenCodeMessageResult> {
     const server = await this.manager.ensureHealthy();
     const body = {
-      session_id: input.sessionId,
-      sessionId: input.sessionId,
-      cwd: input.workspacePath,
-      path: input.workspacePath,
-      workspace: input.workspacePath,
-      message: input.prompt,
-      prompt: input.prompt,
+      parts: [{ type: "text", text: input.prompt }],
+      model: parseModelReference(input.model),
       agent: input.agent,
-      model: input.model ?? undefined,
-      permission: input.permissionProfile,
-      permission_profile: input.permissionProfileName,
+      tools: toolsFromPermissionProfile(input.permissionProfile),
     };
     input.onEvent(runtimeEvent("message_started", server, { stage: input.stage, agent: input.agent, permission_profile: input.permissionProfileName }));
     const response = await this.postAny(
       server.url,
-      [`/session/${encodeURIComponent(input.sessionId)}/message`, `/session/${encodeURIComponent(input.sessionId)}/messages`, "/message", "/messages"],
+      [`/session/${encodeURIComponent(input.sessionId)}/message?directory=${encodeURIComponent(input.workspacePath)}`],
       body,
       this.config.turnTimeoutMs,
       input.signal,
     );
-    const messageId = extractString(response, ["messageId", "message_id", "id", "message.id"]);
+    const failure = response?.info?.error;
+    if (failure && typeof failure === "object") {
+      throw new TwinpodError("message_failed", `OpenCode message failed: ${(failure as any).name ?? "error"}: ${(failure as any).data?.message ?? ""}`);
+    }
+    const messageId = extractString(response, ["info.id", "messageId", "message_id", "id", "message.id"]);
     const usage = extractUsage(response);
     input.onEvent(runtimeEvent("message_completed", server, { stage: input.stage, agent: input.agent, permission_profile: input.permissionProfileName, message_id: messageId, usage }));
     return {
@@ -330,14 +326,44 @@ function extractString(value: any, keys: string[]): string | null {
 }
 
 function extractUsage(value: any): Record<string, unknown> | undefined {
-  const usage = value?.usage ?? value?.tokens ?? value?.message?.usage;
+  const usage = value?.info?.tokens ?? value?.usage ?? value?.tokens ?? value?.message?.usage;
   return usage && typeof usage === "object" ? usage : undefined;
 }
 
 function summarizeResponse(value: any): string {
+  if (Array.isArray(value?.parts)) {
+    const text = value.parts
+      .filter((part: any) => part?.type === "text" && typeof part.text === "string")
+      .map((part: any) => part.text)
+      .join("\n");
+    if (text) return text.slice(0, 4000);
+  }
   const text = value?.summary ?? value?.text ?? value?.message?.text ?? value?.message ?? value?.status;
   if (typeof text === "string") return text.slice(0, 4000);
   return JSON.stringify(value).slice(0, 4000);
+}
+
+export function parseModelReference(model: string | null): { providerID: string; modelID: string } | undefined {
+  if (!model) return undefined;
+  const separator = model.indexOf("/");
+  if (separator <= 0 || separator === model.length - 1) {
+    throw new TwinpodError("invalid_model", `Model must be in provider/model form, got: ${model}`);
+  }
+  return { providerID: model.slice(0, separator), modelID: model.slice(separator + 1) };
+}
+
+export function toolsFromPermissionProfile(profile: unknown): Record<string, boolean> | undefined {
+  if (!profile || typeof profile !== "object") return undefined;
+  const record = profile as Record<string, unknown>;
+  const tools: Record<string, boolean> = {};
+  if (record.edit === "deny") {
+    tools.edit = false;
+    tools.write = false;
+    tools.patch = false;
+  }
+  if (record.bash === "deny") tools.bash = false;
+  if (record.webfetch === "deny") tools.webfetch = false;
+  return Object.keys(tools).length > 0 ? tools : undefined;
 }
 
 function chooseFreePort(hostname: string): Promise<number> {
