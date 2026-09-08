@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "liquidjs": "^10.21.1",
+    "liquidjs": "^10.27.2",
     "yaml": "^2.8.0"
   },
   "devDependencies": {
